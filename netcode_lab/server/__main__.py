@@ -18,7 +18,7 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
 
     logging.basicConfig(
-        level=args.log_level.upper(),
+        level=args.log_level.upper(),   
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
     config = ServerConfig(
