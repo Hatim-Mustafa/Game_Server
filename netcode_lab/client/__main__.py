@@ -26,6 +26,12 @@ def main(argv: list[str] | None = None) -> None:
         default=30.0,
         help="server tick rate; c1 must match the server's --tick-rate",
     )
+    parser.add_argument(
+        "--player",
+        type=int,
+        default=0,
+        help="claim a specific player id (0 = any free id)",
+    )
     parser.add_argument("--duration", type=float, default=10.0)
     parser.add_argument(
         "--input-rate",
@@ -46,6 +52,7 @@ def main(argv: list[str] | None = None) -> None:
         host=args.host,
         port=args.port,
         input_rate=args.input_rate if args.input_rate is not None else args.tick_rate,
+        player_slot=args.player,
     )
     if args.mode == "c1":
         client = PredictedClient(config, ServerConfig(tick_rate=args.tick_rate))

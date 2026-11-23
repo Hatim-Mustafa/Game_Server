@@ -12,6 +12,11 @@ class ServerConfig:
     world_width: int = 1024
     world_height: int = 768
     player_speed: float = 200.0
+    max_health: int = 100
+    attack_damage: int = 10
+    attack_range: float = 90.0
+    attack_cooldown: float = 0.55
+    attack_duration: float = 0.18
 
     @property
     def tick_dt(self) -> float:

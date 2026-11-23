@@ -25,7 +25,16 @@ class Session:
 class GameServer:
     def __init__(self, config: ServerConfig) -> None:
         self.config = config
-        self.world = World(config.world_width, config.world_height, config.player_speed)
+        self.world = World(
+            config.world_width,
+            config.world_height,
+            config.player_speed,
+            max_health=config.max_health,
+            attack_damage=config.attack_damage,
+            attack_range=config.attack_range,
+            attack_cooldown=config.attack_cooldown,
+            attack_duration=config.attack_duration,
+        )
         self.sessions_by_addr: dict[Addr, Session] = {}
         self.sessions_by_player: dict[int, Session] = {}
         self.transport: asyncio.DatagramTransport | None = None
@@ -63,20 +72,33 @@ class GameServer:
             session.ack_window.mark(header.seq)
 
         if header.msg_type is proto.MsgType.JOIN:
-            self._on_join(addr)
+            self._on_join(addr, payload)
         elif header.msg_type is proto.MsgType.INPUT:
             self._on_input(payload, session)
         elif header.msg_type is proto.MsgType.LEAVE:
             self._on_leave(addr)
 
-    def _on_join(self, addr: Addr) -> None:
+    def _on_join(self, addr: Addr, payload: memoryview) -> None:
         existing = self.sessions_by_addr.get(addr)
         if existing is not None:
             self._send_join_ack(existing)
             return
 
-        player_id = self._next_player_id
-        self._next_player_id += 1
+        try:
+            desired = proto.parse_join(payload)
+        except proto.ProtocolError as exc:
+            log.debug("bad JOIN from %s: %s", addr, exc)
+            return
+
+        if desired and desired in self.sessions_by_player:
+            log.info("player slot %d already taken; denying %s", desired, addr)
+            self._send_join_denied(addr)
+            return
+
+        player_id = self._allocate_player_id(desired)
+        if player_id is None:
+            self._send_join_denied(addr)
+            return
         x = self.config.world_width * (0.25 if player_id % 2 else 0.75)
         y = self.config.world_height * 0.5
         self.world.spawn(player_id, x, y)
@@ -112,10 +134,31 @@ class GameServer:
         self.world.remove(session.player_id)
         log.info("player %d left (%s)", session.player_id, addr)
 
+    def _allocate_player_id(self, desired: int) -> int | None:
+        if desired:
+            return desired
+        player_id = self._next_player_id
+        while player_id in self.sessions_by_player and player_id <= 0xFF:
+            player_id += 1
+        if player_id > 0xFF:
+            return None
+        self._next_player_id = player_id + 1
+        return player_id
+
     def _send_join_ack(self, session: Session) -> None:
         header = self._header(proto.MsgType.JOIN_ACK, session)
         packet = proto.pack_join_ack(header, session.player_id)
         self._send(session.addr, packet)
+
+    def _send_join_denied(self, addr: Addr) -> None:
+        header = proto.Header(
+            msg_type=proto.MsgType.JOIN_ACK,
+            seq=self._next_seq(),
+            ack=0,
+            ack_bits=0,
+            tick=self.tick,
+        )
+        self._send(addr, proto.pack_join_ack(header, 0))
 
     def _header(self, msg_type: proto.MsgType, session: Session) -> proto.Header:
         ack, ack_bits = session.ack_window.build()
@@ -141,19 +184,28 @@ class GameServer:
         if not self.sessions_by_player:
             return
         self.snapshot_id += 1
-        snapshot = proto.Snapshot(
-            snapshot_id=self.snapshot_id,
-            base_snapshot_id=0,
-            entities=tuple(
+        entities = []
+        for entity in self.world.entities.values():
+            flags = 0
+            if entity.attack_active > 0.0:
+                flags |= proto.FLAG_ATTACKING
+            if entity.health <= 0:
+                flags |= proto.FLAG_DEAD
+            entities.append(
                 proto.EntityState(
                     entity_id=entity.entity_id,
                     x=round(entity.x),
                     y=round(entity.y),
                     vx=round(entity.vx),
                     vy=round(entity.vy),
+                    health=entity.health,
+                    flags=flags,
                 )
-                for entity in self.world.entities.values()
-            ),
+            )
+        snapshot = proto.Snapshot(
+            snapshot_id=self.snapshot_id,
+            base_snapshot_id=0,
+            entities=tuple(entities),
         )
         payload = proto.snapshot_payload(snapshot)
         for session in self.sessions_by_player.values():
@@ -166,6 +218,12 @@ class GameServer:
         while self._running:
             self.tick += 1
             self.world.tick(dt)
+            if self.world.rematch_requested:
+                if self.world.game_over:
+                    self.world.rematch()
+                    log.info("rematch")
+                else:
+                    self.world.rematch_requested = False
             next_deadline += dt
             await asyncio.sleep(max(0.0, next_deadline - time.monotonic()))
 

@@ -2,143 +2,153 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import math
 
 import pygame
 
 from netcode_lab.client.client import ClientConfig, GameClient
+from netcode_lab.client.predicted_client import PredictedClient
 from netcode_lab.config import ServerConfig
-
+from netcode_lab.protocol.messages import (
+    FLAG_ATTACKING,
+    FLAG_DEAD,
+    Button,
+    EntityState,
+)
 
 WIDTH = 960
 HEIGHT = 540
 WORLD_WIDTH = 1024
 WORLD_HEIGHT = 768
 GROUND_Y = 430
-FIGHT_DISTANCE = 90
+
+PLAYER_ONE = (74, 180, 255)
+PLAYER_TWO = (255, 82, 82)
 
 
 def world_to_screen(x: float, y: float) -> tuple[int, int]:
     return int(x / WORLD_WIDTH * WIDTH), GROUND_Y - int(y / WORLD_HEIGHT * 180)
 
 
-def get_direction(keys: pygame.key.ScancodeWrapper, left: int, right: int, up: int, down: int) -> tuple[int, int]:
+def get_direction(
+    keys: pygame.key.ScancodeWrapper,
+    left: int,
+    right: int,
+    up: int,
+    down: int,
+) -> tuple[int, int]:
     move_x = int(keys[right]) - int(keys[left])
     move_y = int(keys[up]) - int(keys[down])
     return move_x, move_y
 
 
-async def run_game(host: str, port: int) -> None:
+def make_client(mode: str, host: str, port: int, tick_rate: float, player_slot: int) -> GameClient:
+    config = ClientConfig(
+        host=host,
+        port=port,
+        input_rate=tick_rate,
+        player_slot=player_slot,
+    )
+    if mode == "c1":
+        return PredictedClient(config, ServerConfig(tick_rate=tick_rate))
+    return GameClient(config)
+
+
+def remote_entity(client: GameClient) -> EntityState | None:
+    snapshot = client.latest_snapshot
+    if snapshot is None or client.player_id is None:
+        return None
+    return next(
+        (entity for entity in snapshot.entities if entity.entity_id != client.player_id),
+        None,
+    )
+
+
+def winner_id(own: EntityState | None, remote: EntityState | None) -> int | None:
+    if own is None or remote is None:
+        return None
+    if own.health <= 0 and remote.health <= 0:
+        return -1
+    if own.health <= 0:
+        return remote.entity_id
+    if remote.health <= 0:
+        return own.entity_id
+    return None
+
+
+def entity_color(entity_id: int) -> tuple[int, int, int]:
+    return PLAYER_ONE if entity_id % 2 == 1 else PLAYER_TWO
+
+
+async def run_game(host: str, port: int, mode: str, tick_rate: float, player_slot: int) -> None:
     pygame.init()
-    pygame.display.set_caption("NetCode Lab - 1v1 Fighter")
+    pygame.display.set_caption(
+        f"NetCode Lab - Player {player_slot} ({mode.upper()}, server authoritative)"
+    )
     screen = pygame.display.set_mode((WIDTH, HEIGHT))
     clock = pygame.time.Clock()
     font = pygame.font.SysFont("consolas", 22)
     small_font = pygame.font.SysFont("consolas", 16)
 
-    first = GameClient(ClientConfig(host=host, port=port, input_rate=30))
-    second = GameClient(ClientConfig(host=host, port=port, input_rate=30))
-    first_task = asyncio.create_task(first.run())
-    second_task = asyncio.create_task(second.run())
+    client = make_client(mode, host, port, tick_rate, player_slot)
+    client_task = asyncio.create_task(client.run())
 
-    health = {1: 100, 2: 100}
-    attack_timer = {1: 0.0, 2: 0.0}
-    attack_flash = {1: 0.0, 2: 0.0}
-    punch_down = {1: False, 2: False}
-    hit_pending = {1: False, 2: False}
-    facing = {1: 1, 2: -1}
-    winner: int | None = None
     running = True
-
     try:
         while running:
-            dt = clock.tick(60) / 1000.0
+            clock.tick(60)
 
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     running = False
-                if event.type == pygame.KEYDOWN and winner is not None and event.key == pygame.K_r:
-                    health = {1: 100, 2: 100}
-                    attack_timer = {1: 0.0, 2: 0.0}
-                    attack_flash = {1: 0.0, 2: 0.0}
-                    punch_down = {1: False, 2: False}
-                    hit_pending = {1: False, 2: False}
-                    facing = {1: 1, 2: -1}
-                    winner = None
+
+            if client.rejected:
+                print(f"Player slot {player_slot} is already in use. Closing.")
+                running = False
+                break
 
             keys = pygame.key.get_pressed()
-            if winner is None:
-                first_move_x, first_move_y = get_direction(keys, pygame.K_a, pygame.K_d, pygame.K_w, pygame.K_s)
-                second_move_x, second_move_y = get_direction(keys, pygame.K_LEFT, pygame.K_RIGHT, pygame.K_UP, pygame.K_DOWN)
-                if first_move_x != 0:
-                    facing[1] = first_move_x
-                if second_move_x != 0:
-                    facing[2] = second_move_x
-                first.set_input(first_move_x, first_move_y)
-                second.set_input(second_move_x, second_move_y)
+            if keys[pygame.K_ESCAPE]:
+                running = False
+
+            if player_slot == 1:
+                move_x, move_y = get_direction(
+                    keys, pygame.K_a, pygame.K_d, pygame.K_w, pygame.K_s
+                )
+                attack_key = pygame.K_f
             else:
-                first.set_input(0, 0)
-                second.set_input(0, 0)
+                move_x, move_y = get_direction(
+                    keys, pygame.K_LEFT, pygame.K_RIGHT, pygame.K_UP, pygame.K_DOWN
+                )
+                attack_key = pygame.K_k
 
-            punch_keys = {
-                1: keys[pygame.K_f],
-                2: keys[pygame.K_k],
-            }
-            for player_id in (1, 2):
-                attack_timer[player_id] = max(0.0, attack_timer[player_id] - dt)
-                attack_flash[player_id] = max(0.0, attack_flash[player_id] - dt)
-                if (
-                    winner is None
-                    and health[player_id] > 0
-                    and punch_keys[player_id]
-                    and not punch_down[player_id]
-                    and attack_timer[player_id] == 0
-                ):
-                    attack_timer[player_id] = 0.55
-                    attack_flash[player_id] = 0.18
-                    hit_pending[player_id] = True
-                    punch_down[player_id] = True
-                if not punch_keys[player_id]:
-                    punch_down[player_id] = False
+            buttons = int(Button.ATTACK) if keys[attack_key] else 0
+            if keys[pygame.K_r]:
+                buttons |= int(Button.REMATCH)
+            client.set_input(move_x, move_y, buttons)
 
-            first_entity = first.get_entity()
-            second_entity = second.get_entity()
+            own = client.get_entity()
+            remote = remote_entity(client)
+            winner = winner_id(own, remote)
 
-            if first_entity is not None and second_entity is not None:
-                distance = math.hypot(first_entity.x - second_entity.x, first_entity.y - second_entity.y)
-                player1_face = 1 if second_entity.x >= first_entity.x else -1
-                player2_face = 1 if first_entity.x >= second_entity.x else -1
-                facing[1] = player1_face
-                facing[2] = player2_face
-                dx = second_entity.x - first_entity.x
-
-                if winner is None and distance <= FIGHT_DISTANCE:
-                    if (
-                        health[1] > 0
-                        and health[2] > 0
-                        and attack_flash[1] > 0.12
-                        and hit_pending[1]
-                    ):
-                        health[2] = max(0, health[2] - 10)
-                        hit_pending[1] = False
-                    if (
-                        health[1] > 0
-                        and health[2] > 0
-                        and attack_flash[2] > 0.12
-                        and hit_pending[2]
-                    ):
-                        health[1] = max(0, health[1] - 10)
-                        hit_pending[2] = False
-
-            if health[1] <= 0:
-                winner = 2
-            elif health[2] <= 0:
-                winner = 1
-
-            if winner is not None:
-                status = f"PLAYER {winner} WINS"
+            if own is None:
+                status = "CONNECTING..."
+            elif remote is None:
+                status = "WAITING FOR OPPONENT"
+            elif winner == -1:
+                status = "DRAW"
+            elif winner == own.entity_id:
+                status = f"PLAYER {own.entity_id} WINS"
+            elif winner == remote.entity_id:
+                status = f"PLAYER {remote.entity_id} WINS"
             else:
                 status = "FIGHT!"
+
+            if own is not None and remote is not None:
+                own_face = 1 if remote.x >= own.x else -1
+                remote_face = 1 if own.x >= remote.x else -1
+            else:
+                own_face = 1
+                remote_face = -1
 
             screen.fill((18, 22, 38))
 
@@ -148,26 +158,36 @@ async def run_game(host: str, port: int) -> None:
             for offset in range(-200, WIDTH + 200, 80):
                 pygame.draw.circle(screen, (30, 35, 58), (offset, GROUND_Y + 45), 36)
 
-            draw_health_bar(screen, font, 40, 24, "PLAYER 1", health[1], (74, 180, 255))
-            draw_health_bar(screen, font, WIDTH - 360, 24, "PLAYER 2", health[2], (255, 82, 82))
+            _draw_health_bars(screen, font, own, remote)
 
-            if first_entity is not None:
-                sx, sy = world_to_screen(first_entity.x, first_entity.y)
-                first_face = 1
-                if second_entity is not None:
-                    first_face = 1 if second_entity.x >= first_entity.x else -1
-                draw_fighter(screen, sx, sy, (74, 180, 255), attack_flash[1] > 0, first_face)
-            if second_entity is not None:
-                sx, sy = world_to_screen(second_entity.x, second_entity.y)
-                second_face = 1
-                if first_entity is not None:
-                    second_face = 1 if first_entity.x >= second_entity.x else -1
-                draw_fighter(screen, sx, sy, (255, 82, 82), attack_flash[2] > 0, second_face)
+            for entity, face in ((own, own_face), (remote, remote_face)):
+                if entity is None:
+                    continue
+                sx, sy = world_to_screen(entity.x, entity.y)
+                draw_fighter(
+                    screen,
+                    sx,
+                    sy,
+                    entity_color(entity.entity_id),
+                    bool(entity.flags & FLAG_ATTACKING),
+                    face,
+                    bool(entity.flags & FLAG_DEAD),
+                )
 
             title = font.render(status, True, (255, 226, 112))
             screen.blit(title, title.get_rect(center=(WIDTH // 2, 85)))
+            mode_text = small_font.render(
+                f"MODE {mode.upper()}"
+                + (" (prediction)" if mode == "c1" else " (server state)")
+                + f"   PLAYER {player_slot}",
+                True,
+                (150, 160, 200),
+            )
+            screen.blit(mode_text, mode_text.get_rect(center=(WIDTH // 2, 112)))
             controls = small_font.render(
-                "P1: WASD + F    P2: ARROWS + K    ESC: Quit",
+                f"P{player_slot}: "
+                + ("WASD + F" if player_slot == 1 else "ARROWS + K")
+                + "    R: Rematch    ESC: Quit",
                 True,
                 (210, 214, 230),
             )
@@ -187,23 +207,44 @@ async def run_game(host: str, port: int) -> None:
                     width=4,
                     border_radius=18,
                 )
-                game_over = font.render("K.O.", True, (255, 226, 112))
-                winner_text = font.render(f"PLAYER {winner} WINS", True, (255, 255, 255))
-                restart_text = small_font.render("Press R to rematch or ESC to quit", True, (210, 214, 230))
+                game_over = font.render("K.O." if winner != -1 else "TIME", True, (255, 226, 112))
+                winner_text = font.render(status, True, (255, 255, 255))
+                restart_text = small_font.render(
+                    "Press R to rematch or ESC to quit", True, (210, 214, 230)
+                )
                 screen.blit(game_over, game_over.get_rect(center=(WIDTH // 2, HEIGHT // 2 - 65)))
                 screen.blit(winner_text, winner_text.get_rect(center=(WIDTH // 2, HEIGHT // 2)))
                 screen.blit(restart_text, restart_text.get_rect(center=(WIDTH // 2, HEIGHT // 2 + 65)))
 
-            if keys[pygame.K_ESCAPE]:
-                running = False
-
             pygame.display.flip()
             await asyncio.sleep(0)
     finally:
-        for client_task in (first_task, second_task):
-            client_task.cancel()
-        await asyncio.gather(first_task, second_task, return_exceptions=True)
+        client_task.cancel()
+        await asyncio.gather(client_task, return_exceptions=True)
         pygame.quit()
+
+
+def _draw_health_bars(
+    screen: pygame.Surface,
+    font: pygame.font.Font,
+    own: EntityState | None,
+    remote: EntityState | None,
+) -> None:
+    if own is not None and remote is not None:
+        left, right = (own, remote) if own.entity_id < remote.entity_id else (remote, own)
+        draw_health_bar(
+            screen, font, 40, 24, f"PLAYER {left.entity_id}",
+            left.health, entity_color(left.entity_id),
+        )
+        draw_health_bar(
+            screen, font, WIDTH - 360, 24, f"PLAYER {right.entity_id}",
+            right.health, entity_color(right.entity_id),
+        )
+    elif own is not None:
+        draw_health_bar(
+            screen, font, 40, 24, f"PLAYER {own.entity_id}",
+            own.health, entity_color(own.entity_id),
+        )
 
 
 def draw_health_bar(
@@ -215,6 +256,7 @@ def draw_health_bar(
     health: int,
     color: tuple[int, int, int],
 ) -> None:
+    health = max(0, min(100, int(health)))
     label_surface = font.render(label, True, (230, 232, 242))
     screen.blit(label_surface, (x, y))
     pygame.draw.rect(screen, (55, 58, 72), (x, y + 32, 320, 24), border_radius=8)
@@ -228,7 +270,11 @@ def draw_fighter(
     color: tuple[int, int, int],
     attacking: bool,
     face: int = 1,
+    dead: bool = False,
 ) -> None:
+    if dead:
+        color = (90, 94, 110)
+
     pygame.draw.circle(screen, color, (x, foot_y - 118), 24)
     pygame.draw.rect(screen, color, (x - 25, foot_y - 96, 50, 66), border_radius=12)
     pygame.draw.line(screen, color, (x - 20, foot_y - 38), (x - 38, foot_y), 10)
@@ -249,9 +295,28 @@ def main() -> None:
     parser = argparse.ArgumentParser(prog="pygame-fighter")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=9000)
+    parser.add_argument(
+        "--player",
+        type=int,
+        choices=(1, 2),
+        required=True,
+        help="which player this window controls (1 or 2)",
+    )
+    parser.add_argument(
+        "--mode",
+        choices=("c0", "c1"),
+        default="c0",
+        help="c0 = show server state, c1 = client-side prediction",
+    )
+    parser.add_argument(
+        "--tick-rate",
+        type=float,
+        default=30.0,
+        help="server tick rate; c1 must match the server's --tick-rate",
+    )
     args = parser.parse_args()
 
-    asyncio.run(run_game(args.host, args.port))
+    asyncio.run(run_game(args.host, args.port, args.mode, args.tick_rate, args.player))
 
 
 if __name__ == "__main__":

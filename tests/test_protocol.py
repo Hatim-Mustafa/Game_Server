@@ -24,12 +24,30 @@ class HeaderRoundTripTest(unittest.TestCase):
             proto.decode(b"\x01\x02")
 
 
+class JoinTest(unittest.TestCase):
+    def test_desired_slot_round_trip(self) -> None:
+        header = proto.Header(proto.MsgType.JOIN, seq=1)
+        decoded, payload = proto.decode(proto.pack_join(header, 2))
+        self.assertEqual(decoded.msg_type, proto.MsgType.JOIN)
+        self.assertEqual(proto.parse_join(payload), 2)
+
+    def test_default_slot_is_any(self) -> None:
+        header = proto.Header(proto.MsgType.JOIN, seq=1)
+        _, payload = proto.decode(proto.pack_join(header))
+        self.assertEqual(proto.parse_join(payload), 0)
+
+
 class JoinAckTest(unittest.TestCase):
     def test_round_trip(self) -> None:
         header = proto.Header(proto.MsgType.JOIN_ACK, seq=1)
         decoded, payload = proto.decode(proto.pack_join_ack(header, 3))
         self.assertEqual(decoded.msg_type, proto.MsgType.JOIN_ACK)
         self.assertEqual(proto.parse_join_ack(payload), 3)
+
+    def test_denied_is_zero(self) -> None:
+        header = proto.Header(proto.MsgType.JOIN_ACK, seq=1)
+        _, payload = proto.decode(proto.pack_join_ack(header, 0))
+        self.assertEqual(proto.parse_join_ack(payload), 0)
 
 
 class InputTest(unittest.TestCase):

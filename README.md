@@ -71,6 +71,53 @@ at the end. With `--csv`, the columns `mode`, `pending_inputs`,
 `reconciliations`, `corrections` and `last_correction_px` are added (zeros for
 C0).
 
+## Running the pygame fighter (server-authoritative)
+
+Run **one window per player**. Each window is a separate client that claims a
+specific player slot from the server, so you can put the two windows side by
+side. All movement, attacks, health, KO and rematch are decided by the
+server. Install the UI dependency first:
+
+```
+pip install -r requirements.txt
+python -m netcode_lab.server --port 9000
+
+# terminal 2: player 1
+python pygame_fighter.py --player 1 --mode c0
+
+# terminal 3: player 2
+python pygame_fighter.py --player 2 --mode c0
+```
+
+If a player slot is already claimed (for example you launch a second
+`--player 1`), the new window prints `Player slot 1 is already in use.` and
+closes.
+
+Pick the netcode phase independently per window with `--mode`:
+
+- `--mode c0` — draw the server's authoritative state (default)
+- `--mode c1` — client-side prediction for the local fighter
+
+Each window renders its own player via its own client (predicted in `c1`) and
+the opponent from server snapshots. Running one window as `c1` and the other
+as `c0` lets you see prediction on one screen while the other still shows
+snapshot latency. Set the same `--tick-rate` on server and any `c1` client:
+
+```
+python pygame_fighter.py --player 1 --mode c1 --tick-rate 30
+```
+
+Flags: `--player {1,2}` (required), `--mode {c0,c1}`, `--tick-rate`,
+`--host`, `--port`. The active mode and player are shown in the window.
+
+Controls: player 1 uses `WASD` + `F` (attack); player 2 uses arrow keys + `K`
+(attack); `R` = rematch after a KO; `ESC` = quit.
+
+The server applies attack damage only on the rising edge of the attack
+button, when the target is within `attack_range` and the cooldown has
+expired. Health (`0..100`), the attacking flag and the dead flag are carried
+in each snapshot; see `docs/PROTOCOL.md`.
+
 ## Tests
 
 ```

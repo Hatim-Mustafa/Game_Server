@@ -68,12 +68,19 @@ class PredictedClient(GameClient):
         if self.player_id is None or not self.predictor.initialized:
             return None
         p = self.predictor
+        server_entity = super().get_entity()
+        if server_entity is not None and server_entity.health <= 0:
+            return server_entity
+        health = server_entity.health if server_entity is not None else 100
+        flags = server_entity.flags if server_entity is not None else 0
         return proto.EntityState(
             entity_id=self.player_id,
             x=round(p.x),
             y=round(p.y),
             vx=round(p.vx),
             vy=round(p.vy),
+            health=health,
+            flags=flags,
         )
 
     def get_server_entity(self) -> proto.EntityState | None:

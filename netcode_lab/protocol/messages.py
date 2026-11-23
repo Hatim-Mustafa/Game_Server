@@ -2,25 +2,34 @@ from __future__ import annotations
 
 import struct
 from dataclasses import dataclass
-from enum import IntEnum
+from enum import IntEnum, IntFlag
 
 PROTOCOL_ID = 0x4E433031
-VERSION = 1
+VERSION = 3
 ACK_BITS_MASK = 0xFFFFFFFF
 
 HEADER = struct.Struct("<IBBIIII")
 HEADER_SIZE = HEADER.size
 
+_JOIN = struct.Struct("<B")
 _JOIN_ACK = struct.Struct("<B")
 _INPUT_COUNT = struct.Struct("<B")
 _INPUT = struct.Struct("<IIbbB")
 _SNAPSHOT_HEAD = struct.Struct("<IIB")
-_ENTITY = struct.Struct("<Bhhhh")
+_ENTITY = struct.Struct("<BhhhhBB")
 _EVENT_HEAD = struct.Struct("<IB")
+
+FLAG_ATTACKING = 1 << 0
+FLAG_DEAD = 1 << 1
 
 
 class ProtocolError(ValueError):
     pass
+
+
+class Button(IntFlag):
+    ATTACK = 1 << 0
+    REMATCH = 1 << 1
 
 
 class MsgType(IntEnum):
@@ -57,6 +66,8 @@ class EntityState:
     y: int
     vx: int
     vy: int
+    health: int = 100
+    flags: int = 0
 
 
 @dataclass(frozen=True)
@@ -97,8 +108,14 @@ def decode(data: bytes) -> tuple[Header, memoryview]:
     return Header(msg_type, seq, ack, ack_bits, tick), memoryview(data)[HEADER_SIZE:]
 
 
-def pack_join(header: Header) -> bytes:
-    return encode(header)
+def pack_join(header: Header, desired_player_id: int = 0) -> bytes:
+    return encode(header, _JOIN.pack(desired_player_id & 0xFF))
+
+
+def parse_join(payload: memoryview) -> int:
+    if len(payload) < _JOIN.size:
+        raise ProtocolError("short JOIN payload")
+    return _JOIN.unpack_from(payload, 0)[0]
 
 
 def pack_join_ack(header: Header, player_id: int) -> bytes:
@@ -159,6 +176,8 @@ def snapshot_payload(snapshot: Snapshot) -> bytes:
             max(-32768, min(32767, int(entity.y))),
             max(-32768, min(32767, int(entity.vx))),
             max(-32768, min(32767, int(entity.vy))),
+            max(0, min(255, int(entity.health))),
+            entity.flags & 0xFF,
         )
     return bytes(body)
 
@@ -177,9 +196,9 @@ def parse_snapshot(payload: memoryview) -> Snapshot:
     offset = _SNAPSHOT_HEAD.size
     entities = []
     for _ in range(count):
-        entity_id, x, y, vx, vy = _ENTITY.unpack_from(payload, offset)
+        entity_id, x, y, vx, vy, health, flags = _ENTITY.unpack_from(payload, offset)
         offset += _ENTITY.size
-        entities.append(EntityState(entity_id, x, y, vx, vy))
+        entities.append(EntityState(entity_id, x, y, vx, vy, health, flags))
     return Snapshot(snapshot_id, base_snapshot_id, tuple(entities))
 
 

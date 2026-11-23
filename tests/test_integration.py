@@ -52,5 +52,43 @@ class ClientServerIntegrationTest(unittest.IsolatedAsyncioTestCase):
             await asyncio.gather(server_task, return_exceptions=True)
 
 
+class PlayerSlotTest(unittest.IsolatedAsyncioTestCase):
+    async def test_claim_and_denial(self) -> None:
+        server = GameServer(
+            ServerConfig(host="127.0.0.1", port=0, tick_rate=60, snapshot_rate=30)
+        )
+        server_task = asyncio.create_task(server.run())
+        tasks: list[asyncio.Task] = []
+        try:
+            for _ in range(200):
+                if server.transport is not None:
+                    break
+                await asyncio.sleep(0.01)
+            port = server.transport.get_extra_info("sockname")[1]
+
+            first = GameClient(
+                ClientConfig(host="127.0.0.1", port=port, player_slot=2)
+            )
+            second = GameClient(
+                ClientConfig(host="127.0.0.1", port=port, player_slot=2)
+            )
+            tasks.append(asyncio.create_task(first.run(duration=1.5)))
+            await asyncio.wait_for(first.joined.wait(), timeout=2.0)
+            self.assertEqual(first.player_id, 2)
+
+            tasks.append(asyncio.create_task(second.run(duration=1.5)))
+            for _ in range(200):
+                if second.rejected:
+                    break
+                await asyncio.sleep(0.01)
+            self.assertTrue(second.rejected, "second claimant should be denied")
+            self.assertIsNone(second.player_id)
+        finally:
+            for task in tasks:
+                task.cancel()
+            server_task.cancel()
+            await asyncio.gather(*tasks, server_task, return_exceptions=True)
+
+
 if __name__ == "__main__":
     unittest.main()

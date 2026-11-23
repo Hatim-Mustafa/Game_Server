@@ -18,6 +18,7 @@ class ClientConfig:
     port: int = 9000
     input_rate: float = 30.0
     join_retry_interval: float = 0.5
+    player_slot: int = 0
 
     @property
     def input_interval(self) -> float:
@@ -29,6 +30,8 @@ class GameClient:
         self.config = config
         self.server_addr: Addr = (config.host, config.port)
         self.transport: asyncio.DatagramTransport | None = None
+        self.desired_player_id = config.player_slot & 0xFF
+        self.rejected = False
         self.player_id: int | None = None
         self.server_ack = AckWindow()
         self.local_seq = 0
@@ -91,7 +94,17 @@ class GameClient:
 
         try:
             if header.msg_type is proto.MsgType.JOIN_ACK:
-                self.player_id = proto.parse_join_ack(payload)
+                assigned = proto.parse_join_ack(payload)
+                if assigned == 0 or (
+                    self.desired_player_id and assigned != self.desired_player_id
+                ):
+                    self.rejected = True
+                    log.warning(
+                        "server denied player slot %d (already in use)",
+                        self.desired_player_id,
+                    )
+                    return
+                self.player_id = assigned
                 if not self.joined.is_set():
                     log.info("joined as player %d", self.player_id)
                     self.joined.set()
@@ -124,7 +137,9 @@ class GameClient:
             self.transport.sendto(packet, self.server_addr)
 
     def _send_join(self) -> None:
-        self._send(proto.pack_join(self._header(proto.MsgType.JOIN)))
+        self._send(
+            proto.pack_join(self._header(proto.MsgType.JOIN), self.desired_player_id)
+        )
 
     def _send_leave(self) -> None:
         if self.transport is not None:
@@ -143,7 +158,7 @@ class GameClient:
 
     async def _join_loop(self) -> None:
         while self._running:
-            if self.joined.is_set():
+            if self.joined.is_set() or self.rejected:
                 return
             self._send_join()
             try:

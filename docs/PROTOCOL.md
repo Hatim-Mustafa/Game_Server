@@ -1,6 +1,6 @@
-# NetCode Lab — Wire Protocol (frozen v1)
+# NetCode Lab — Wire Protocol (v3)
 
-Status: **frozen**. This document is the single source of truth for the binary
+Status: **frozen at v3**. This document is the single source of truth for the binary
 format. The reference implementation lives in
 `netcode_lab/protocol/messages.py`. Any breaking change requires bumping
 `VERSION` in that module and updating this document in the same commit.
@@ -18,7 +18,7 @@ format. The reference implementation lives in
 | Offset | Size | Field        | Type   | Meaning |
 |-------:|-----:|--------------|--------|---------|
 | 0      | 4    | `protocol_id`| uint32 | Always `0x4E433031` (ASCII `NC01`) |
-| 4      | 1    | `version`    | uint8  | Always `1` |
+| 4      | 1    | `version`    | uint8  | Always `3` |
 | 5      | 1    | `msg_type`   | uint8  | See message table |
 | 6      | 4    | `seq`        | uint32 | Sender's packet sequence number |
 | 10     | 4    | `ack`        | uint32 | Highest `seq` received from the peer |
@@ -55,8 +55,8 @@ Example: received sequences 3, 4, 6. Then `ack = 6`,
 
 | `msg_type` | Name       | Direction | Payload |
 |-----------:|------------|-----------|---------|
-| 1          | `JOIN`     | client → server | none |
-| 2          | `JOIN_ACK` | server → client | `player_id` |
+| 1          | `JOIN`     | client → server | desired player id |
+| 2          | `JOIN_ACK` | server → client | assigned player id (`0` = denied) |
 | 3          | `INPUT`    | client → server | input records |
 | 4          | `SNAPSHOT` | server → client | snapshot |
 | 5          | `EVENT`    | server → client | event |
@@ -67,9 +67,15 @@ the receiver.
 
 ### 1. JOIN (client → server)
 
-Header only. Requests admission to the game. On success the server replies
-with `JOIN_ACK`; a client that does not receive one may resend `JOIN` with a
-new `seq`.
+| Offset | Size | Field               | Type  |
+|-------:|-----:|---------------------|-------|
+| 22     | 1    | `desired_player_id` | uint8 |
+
+Struct: `<B`. Requests admission, optionally claiming a specific player slot.
+`0` means "any free slot". If the requested slot is already occupied the
+server replies with a `JOIN_ACK` whose `player_id` is `0` (denied); otherwise
+it assigns that slot. A client that receives no reply may resend `JOIN` with
+a new `seq`.
 
 ### 2. JOIN_ACK (server → client)
 
@@ -79,8 +85,9 @@ new `seq`.
 
 Struct: `<B`. Total packet size: 23 bytes.
 
-`player_id` is also the entity id used in snapshots, and is always in
-`1..255`.
+`player_id` is the assigned entity id, in `1..255`. The value `0` means the
+join was **denied** and the client must stop retrying (for example, the
+requested slot is already taken).
 
 ### 3. INPUT (client → server)
 
@@ -97,11 +104,23 @@ Each input record (11 bytes, format `<IIbbB`):
 | 4           | 4    | `tick`      | uint32 | Client's tick when the input was produced |
 | 8           | 1    | `move_x`    | int8  | Horizontal intent, clamped to `-1..1` by server |
 | 9           | 1    | `move_y`    | int8  | Vertical intent, clamped to `-1..1` by server |
-| 10          | 1    | `buttons`   | uint8 | Bit flags, reserved |
+| 10          | 1    | `buttons`   | uint8 | Button bit flags (see below) |
 
 The server ignores any record whose `input_seq` is not greater than the last
 accepted `input_seq` for that player, so repeated (redundant) records are
 safe. `count` may be `0`.
+
+#### Button bits (`buttons`)
+
+| Bit | Mask | Name      | Meaning |
+|----:|-----:|-----------|---------|
+| 0   | 0x01 | `ATTACK`  | Attack while held; server fires on the rising edge, subject to cooldown |
+| 1   | 0x02 | `REMATCH` | Request a restart after a KO (server only acts when the round is over) |
+| 2-7 |      | reserved  | Must be `0` |
+
+Attack resolution is entirely server-side: the server checks cooldown, range
+and target, applies damage, and then reports the result in the next
+`SNAPSHOT`.
 
 ### 4. SNAPSHOT (server → client)
 
@@ -110,9 +129,9 @@ safe. `count` may be `0`.
 | 22     | 4    | `snapshot_id`      | uint32 | Server snapshot counter, starts at 1 |
 | 26     | 4    | `base_snapshot_id` | uint32 | `0` = full snapshot |
 | 30     | 1    | `entity_count`     | uint8  | Number of entity records (max 255) |
-| 31     | ...  | `entities[entity_count]` | | Each entity record is 9 bytes |
+| 31     | ...  | `entities[entity_count]` | | Each entity record is 11 bytes |
 
-Each entity record (9 bytes, format `<Bhhhh`):
+Each entity record (11 bytes, format `<BhhhhBB`):
 
 | Rel. offset | Size | Field       | Type  | Meaning |
 |------------:|-----:|-------------|-------|---------|
@@ -121,10 +140,20 @@ Each entity record (9 bytes, format `<Bhhhh`):
 | 3           | 2    | `y`         | int16 | World y position (rounded) |
 | 5           | 2    | `vx`        | int16 | x velocity (units/second, rounded) |
 | 7           | 2    | `vy`        | int16 | y velocity (units/second, rounded) |
+| 9           | 1    | `health`    | uint8 | Authoritative health, `0..100` |
+| 10          | 1    | `flags`     | uint8 | State bit flags (see below) |
+
+#### Entity flags (`flags`)
+
+| Bit | Mask | Name        | Meaning |
+|----:|-----:|-------------|---------|
+| 0   | 0x01 | `ATTACKING` | Attack animation window is active |
+| 1   | 0x02 | `DEAD`      | Health has reached 0; entity cannot move or attack |
+| 2-7 |      | reserved    | Always `0` |
 
 `base_snapshot_id = 0` means the payload is a complete state. Delta
 compression (C3) will use a non-zero `base_snapshot_id` in a future protocol
-version; v1 always sends `0`.
+version; v2 always sends `0`.
 
 ### 5. EVENT (server → client)
 
@@ -135,12 +164,12 @@ version; v1 always sends `0`.
 | 27     | ...  | `data`       | bytes  | Opaque, length = remainder |
 
 Reserved for the reliable event channel. No `event_type` values are defined
-in v1.
+in v2; KO is derived from `health == 0` in snapshots.
 
 ### 6. LEAVE (client → server)
 
 Header only. Announces an intentional disconnect. Best-effort; the server
-also removes a client on its own timeout policy (not implemented in v1).
+also removes a client on its own timeout policy (not implemented in v2).
 
 ## Worked example
 
@@ -149,7 +178,7 @@ also removes a client on its own timeout policy (not implemented in v1).
 
 ```
 31 30 43 4E   protocol_id = "NC01"
-01            version
+03            version
 02            msg_type = JOIN_ACK
 00 00 00 00   seq = 0
 01 00 00 00   ack = 1
@@ -158,10 +187,16 @@ also removes a client on its own timeout policy (not implemented in v1).
 01            player_id = 1
 ```
 
-## Known v1 simplifications
+## Known v3 simplifications
 
 - The server's `seq` is a single global counter shared across all clients.
   As a result a client can observe gaps caused by packets sent to other
   clients. Acknowledgement logic remains correct, but per-client gap counting
   is not meaningful. This will be made per-session before measuring loss.
 - No packet-level checksum beyond the UDP/IP checksums.
+- Attack input is a single `INPUT` record per packet in C0, so a lost packet
+  can lose an attack press. C3 input redundancy addresses this.
+- A rematch is triggered by either player pressing `REMATCH` once the round
+  is over; there is no confirmation handshake.
+- There is no rejoin-with-same-id handshake beyond `JOIN`; a client that
+  disconnects without `LEAVE` holds its slot until the server adds a timeout.
