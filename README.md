@@ -54,6 +54,23 @@ It patrols automatically and prints player position/velocity every
 `--print-interval` seconds. Add `--csv out.csv` to record a per-sample trace
 for later analysis. Run two clients against one server to see both entities.
 
+## Running a C1 (prediction) client
+
+C1 applies each input locally straight away and reconciles with the server
+when snapshots arrive (see `netcode_lab/client/prediction.py`).
+
+```
+python -m netcode_lab.client --mode c1 --host 127.0.0.1 --port 9000 --duration 10
+```
+
+`--tick-rate` must match the server's `--tick-rate` (default 30 for both).
+Each printed line adds `pending` (inputs not yet confirmed) and
+`corrections=N/M` (snapshots that moved the player by more than 1 unit, out of
+snapshots used). A summary with correction rate, mean and max size is printed
+at the end. With `--csv`, the columns `mode`, `pending_inputs`,
+`reconciliations`, `corrections` and `last_correction_px` are added (zeros for
+C0).
+
 ## Tests
 
 ```

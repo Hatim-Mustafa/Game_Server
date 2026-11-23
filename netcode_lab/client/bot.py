@@ -19,6 +19,11 @@ CSV_COLUMNS = (
     "vy",
     "server_tick",
     "snapshots_received",
+    "mode",
+    "pending_inputs",
+    "reconciliations",
+    "corrections",
+    "last_correction_px",
 )
 
 
@@ -58,8 +63,25 @@ async def run_headless(
             csv_file.close()
 
 
+def _prediction_fields(client: GameClient) -> tuple[str, int, int, int, float]:
+    """C1 metrics; zeros for clients without prediction (C0)."""
+    predictor = getattr(client, "predictor", None)
+    mode = getattr(client, "mode", "c0")
+    if predictor is None:
+        return mode, 0, 0, 0, 0.0
+    stats = predictor.stats
+    return (
+        mode,
+        len(predictor.pending),
+        stats.reconciliations,
+        stats.corrections,
+        stats.last_px,
+    )
+
+
 def _report(client: GameClient, elapsed: float, writer: csv.writer | None) -> None:
     entity = client.get_entity()
+    mode, pending, reconciliations, corrections, last_px = _prediction_fields(client)
     snapshot = client.latest_snapshot
     snapshot_id = snapshot.snapshot_id if snapshot is not None else 0
     if entity is None:
@@ -70,6 +92,12 @@ def _report(client: GameClient, elapsed: float, writer: csv.writer | None) -> No
         print(
             f"t={elapsed:5.2f}s player={client.player_id} snap={snapshot_id} "
             f"pos=({x},{y}) vel=({vx},{vy}) snaps={client.snapshots_received}"
+            + (
+                f" pending={pending} corrections={corrections}/{reconciliations}"
+                f" last={last_px:.1f}px"
+                if mode != "c0"
+                else ""
+            )
         )
     if writer is not None:
         writer.writerow(
@@ -84,5 +112,10 @@ def _report(client: GameClient, elapsed: float, writer: csv.writer | None) -> No
                 vy,
                 client.tick,
                 client.snapshots_received,
+                mode,
+                pending,
+                reconciliations,
+                corrections,
+                f"{last_px:.3f}",
             )
         )
