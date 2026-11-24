@@ -7,12 +7,14 @@ from dataclasses import dataclass, field
 
 from netcode_lab.config import ServerConfig
 from netcode_lab.protocol import messages as proto
-from netcode_lab.protocol.ack import AckWindow
+from netcode_lab.protocol.ack import AckWindow, seq_newer
 from netcode_lab.server.world import World
 
 log = logging.getLogger(__name__)
 
 Addr = tuple[str, int]
+SNAPSHOT_HISTORY_SIZE = 128
+SENT_SEQ_HISTORY_SIZE = 256
 
 
 @dataclass
@@ -20,6 +22,10 @@ class Session:
     player_id: int
     addr: Addr
     ack_window: AckWindow = field(default_factory=AckWindow)
+    capabilities: int = 0
+    delta_enabled: bool = False
+    acked_snapshot_id: int = 0
+    sent_snapshots: dict[int, int] = field(default_factory=dict)
 
 
 class GameServer:
@@ -41,6 +47,8 @@ class GameServer:
         self.server_seq = 0
         self.tick = 0
         self.snapshot_id = 0
+        self.snapshot_history: dict[int, dict[int, proto.EntityState]] = {}
+        self._snapshot_history_order: list[int] = []
         self._next_player_id = 1
         self._running = False
 
@@ -70,6 +78,7 @@ class GameServer:
         session = self.sessions_by_addr.get(addr)
         if session is not None:
             session.ack_window.mark(header.seq)
+            self._update_acked_snapshot(session, header.ack)
 
         if header.msg_type is proto.MsgType.JOIN:
             self._on_join(addr, payload)
@@ -85,7 +94,7 @@ class GameServer:
             return
 
         try:
-            desired = proto.parse_join(payload)
+            desired, capabilities = proto.parse_join(payload)
         except proto.ProtocolError as exc:
             log.debug("bad JOIN from %s: %s", addr, exc)
             return
@@ -103,10 +112,20 @@ class GameServer:
         y = self.config.world_height * 0.5
         self.world.spawn(player_id, x, y)
 
-        session = Session(player_id=player_id, addr=addr)
+        session = Session(
+            player_id=player_id,
+            addr=addr,
+            capabilities=capabilities,
+            delta_enabled=bool(capabilities & proto.Capability.DELTA_SNAPSHOTS),
+        )
         self.sessions_by_addr[addr] = session
         self.sessions_by_player[player_id] = session
-        log.info("player %d joined from %s", player_id, addr)
+        log.info(
+            "player %d joined from %s (delta=%s)",
+            player_id,
+            addr,
+            session.delta_enabled,
+        )
         self._send_join_ack(session)
 
     def _on_input(self, payload: memoryview, session: Session | None) -> None:
@@ -184,33 +203,89 @@ class GameServer:
         if not self.sessions_by_player:
             return
         self.snapshot_id += 1
-        entities = []
+        states = self._world_states()
+        self.snapshot_history[self.snapshot_id] = states
+        self._snapshot_history_order.append(self.snapshot_id)
+        while len(self._snapshot_history_order) > SNAPSHOT_HISTORY_SIZE:
+            old = self._snapshot_history_order.pop(0)
+            self.snapshot_history.pop(old, None)
+
+        full_snapshot = proto.Snapshot(
+            snapshot_id=self.snapshot_id,
+            base_snapshot_id=0,
+            entities=tuple(states[entity_id] for entity_id in sorted(states)),
+        )
+        full_payload = proto.snapshot_payload(full_snapshot)
+        interval = self.config.delta_keyframe_interval
+        force_keyframe = interval > 0 and self.snapshot_id % interval == 0
+
+        for session in self.sessions_by_player.values():
+            header = self._header(proto.MsgType.SNAPSHOT, session)
+            if session.delta_enabled and not force_keyframe:
+                payload = self._delta_payload(session, states, full_payload)
+            else:
+                payload = full_payload
+            self._send(session.addr, proto.encode(header, payload))
+            session.sent_snapshots[header.seq] = self.snapshot_id
+            while len(session.sent_snapshots) > SENT_SEQ_HISTORY_SIZE:
+                oldest = next(iter(session.sent_snapshots))
+                del session.sent_snapshots[oldest]
+
+    def _world_states(self) -> dict[int, proto.EntityState]:
+        states: dict[int, proto.EntityState] = {}
         for entity in self.world.entities.values():
             flags = 0
             if entity.attack_active > 0.0:
                 flags |= proto.FLAG_ATTACKING
             if entity.health <= 0:
                 flags |= proto.FLAG_DEAD
-            entities.append(
-                proto.EntityState(
-                    entity_id=entity.entity_id,
-                    x=round(entity.x),
-                    y=round(entity.y),
-                    vx=round(entity.vx),
-                    vy=round(entity.vy),
-                    health=entity.health,
-                    flags=flags,
-                )
+            states[entity.entity_id] = proto.EntityState(
+                entity_id=entity.entity_id,
+                x=round(entity.x),
+                y=round(entity.y),
+                vx=round(entity.vx),
+                vy=round(entity.vy),
+                health=entity.health,
+                flags=flags,
             )
-        snapshot = proto.Snapshot(
-            snapshot_id=self.snapshot_id,
-            base_snapshot_id=0,
-            entities=tuple(entities),
+        return states
+
+    def _delta_payload(
+        self,
+        session: Session,
+        states: dict[int, proto.EntityState],
+        full_payload: bytes,
+    ) -> bytes:
+        base_id = session.acked_snapshot_id
+        baseline = self.snapshot_history.get(base_id) if base_id else None
+        if baseline is None:
+            return full_payload
+        changed = [
+            states[entity_id]
+            for entity_id in sorted(states)
+            if baseline.get(entity_id) != states[entity_id]
+        ]
+        removed = tuple(
+            entity_id for entity_id in sorted(baseline) if entity_id not in states
         )
-        payload = proto.snapshot_payload(snapshot)
-        for session in self.sessions_by_player.values():
-            header = self._header(proto.MsgType.SNAPSHOT, session)
-            self._send(session.addr, proto.encode(header, payload))
+        delta = proto.Snapshot(
+            snapshot_id=self.snapshot_id,
+            base_snapshot_id=base_id,
+            entities=tuple(changed),
+            removed_entity_ids=removed,
+        )
+        return proto.snapshot_payload(delta)
+
+    def _update_acked_snapshot(self, session: Session, ack: int) -> None:
+        if ack == 0:
+            return
+        snapshot_id = session.sent_snapshots.get(ack)
+        if snapshot_id is None:
+            return
+        if session.acked_snapshot_id == 0 or seq_newer(
+            snapshot_id, session.acked_snapshot_id
+        ):
+            session.acked_snapshot_id = snapshot_id
 
     async def _tick_loop(self) -> None:
         dt = self.config.tick_dt

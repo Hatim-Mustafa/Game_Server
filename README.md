@@ -28,6 +28,7 @@ netcode_lab/
     prediction.py        predictor logic and correction stats
     interpolated_client.py  C2 client (C1 + remote interpolation)
     interpolation.py     snapshot interpolator
+    compressed_client.py   C3 client (C2 + redundancy + delta snapshots)
     bot.py             headless patrol bot and reporting
     __main__.py        command-line entry point
 tests/                 protocol, ack window, world and integration tests
@@ -91,6 +92,27 @@ python -m netcode_lab.client --mode c2 --host 127.0.0.1 --port 9000 \
 sets the playback delay; the effective visible delay is roughly this plus the
 one-way network delay. Correction metrics are reported the same way as C1.
 
+## Running a C3 (redundancy + delta) client
+
+C3 is C2 plus two robustness/bandwidth features:
+
+- **Input redundancy** — each INPUT packet repeats the last `--redundancy`
+  inputs (default 3), so a lost packet doesn't lose an attack press or a
+  direction change.
+- **Delta-compressed snapshots** — C3 advertises the `DELTA_SNAPSHOTS`
+  capability in JOIN; the server then sends each snapshot as a delta against
+  the newest snapshot the client acknowledged, with a full keyframe every
+  `delta_keyframe_interval` (default 20) snapshots.
+
+```
+python -m netcode_lab.client --mode c3 --host 127.0.0.1 --port 9000 \
+    --tick-rate 30 --interpolation-delay-ms 100 --redundancy 3 --duration 10
+```
+
+`--tick-rate` must match the server. `--redundancy` trades INPUT bandwidth for
+loss tolerance. C0-C2 clients do not advertise the capability and keep
+receiving full snapshots.
+
 ## Running the pygame fighter (server-authoritative)
 
 Run **one window per player**. Each window is a separate client that claims a
@@ -118,19 +140,21 @@ Pick the netcode phase independently per window with `--mode`:
 - `--mode c0` — draw the server's authoritative state (default)
 - `--mode c1` — client-side prediction for the local fighter
 - `--mode c2` — C1 plus interpolated rendering of the opponent
+- `--mode c3` — C2 plus input redundancy and delta snapshots
 
-Each window renders its own player via its own client (predicted in `c1`/`c2`)
-and the opponent from snapshots (`c2` interpolates it). Running different
-modes per window lets you compare them side by side. Set the same
-`--tick-rate` on server and any `c1`/`c2` client:
+Each window renders its own player via its own client (predicted in
+`c1`/`c2`/`c3`) and the opponent from snapshots (`c2`/`c3` interpolate it).
+Running different modes per window lets you compare them side by side. Set
+the same `--tick-rate` on server and any `c1`/`c2`/`c3` client:
 
 ```
-python pygame_fighter.py --player 1 --mode c2 --tick-rate 30 --interpolation-delay-ms 100
+python pygame_fighter.py --player 1 --mode c3 --tick-rate 30 \
+    --interpolation-delay-ms 100 --redundancy 3
 ```
 
-Flags: `--player {1,2}` (required), `--mode {c0,c1,c2}`, `--tick-rate`,
-`--interpolation-delay-ms` (C2), `--host`, `--port`. The active mode and
-player are shown in the window.
+Flags: `--player {1,2}` (required), `--mode {c0,c1,c2,c3}`, `--tick-rate`,
+`--interpolation-delay-ms` (C2/C3), `--redundancy` (C3), `--host`, `--port`.
+The active mode and player are shown in the window.
 
 Controls: player 1 uses `WASD` + `F` (attack); player 2 uses arrow keys + `K`
 (attack); `R` = rematch after a KO; `ESC` = quit.

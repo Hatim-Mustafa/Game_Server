@@ -5,17 +5,17 @@ from dataclasses import dataclass
 from enum import IntEnum, IntFlag
 
 PROTOCOL_ID = 0x4E433031
-VERSION = 3
+VERSION = 4
 ACK_BITS_MASK = 0xFFFFFFFF
 
 HEADER = struct.Struct("<IBBIIII")
 HEADER_SIZE = HEADER.size
 
-_JOIN = struct.Struct("<B")
+_JOIN = struct.Struct("<BB")
 _JOIN_ACK = struct.Struct("<B")
 _INPUT_COUNT = struct.Struct("<B")
 _INPUT = struct.Struct("<IIbbB")
-_SNAPSHOT_HEAD = struct.Struct("<IIB")
+_SNAPSHOT_HEAD = struct.Struct("<IIBB")
 _ENTITY = struct.Struct("<BhhhhBB")
 _EVENT_HEAD = struct.Struct("<IB")
 
@@ -30,6 +30,10 @@ class ProtocolError(ValueError):
 class Button(IntFlag):
     ATTACK = 1 << 0
     REMATCH = 1 << 1
+
+
+class Capability(IntFlag):
+    DELTA_SNAPSHOTS = 1 << 0
 
 
 class MsgType(IntEnum):
@@ -75,6 +79,7 @@ class Snapshot:
     snapshot_id: int
     base_snapshot_id: int
     entities: tuple[EntityState, ...]
+    removed_entity_ids: tuple[int, ...] = ()
 
 
 def _i8(value: int) -> int:
@@ -108,14 +113,22 @@ def decode(data: bytes) -> tuple[Header, memoryview]:
     return Header(msg_type, seq, ack, ack_bits, tick), memoryview(data)[HEADER_SIZE:]
 
 
-def pack_join(header: Header, desired_player_id: int = 0) -> bytes:
-    return encode(header, _JOIN.pack(desired_player_id & 0xFF))
+def pack_join(
+    header: Header,
+    desired_player_id: int = 0,
+    capabilities: int = 0,
+) -> bytes:
+    return encode(
+        header,
+        _JOIN.pack(desired_player_id & 0xFF, capabilities & 0xFF),
+    )
 
 
-def parse_join(payload: memoryview) -> int:
+def parse_join(payload: memoryview) -> tuple[int, int]:
     if len(payload) < _JOIN.size:
         raise ProtocolError("short JOIN payload")
-    return _JOIN.unpack_from(payload, 0)[0]
+    desired_player_id, capabilities = _JOIN.unpack_from(payload, 0)
+    return desired_player_id, capabilities
 
 
 def pack_join_ack(header: Header, player_id: int) -> bytes:
@@ -162,11 +175,14 @@ def parse_input(payload: memoryview) -> tuple[InputRecord, ...]:
 def snapshot_payload(snapshot: Snapshot) -> bytes:
     if len(snapshot.entities) > 255:
         raise ProtocolError("too many entities in one snapshot")
+    if len(snapshot.removed_entity_ids) > 255:
+        raise ProtocolError("too many removed entities in one snapshot")
     body = bytearray(
         _SNAPSHOT_HEAD.pack(
             snapshot.snapshot_id & ACK_BITS_MASK,
             snapshot.base_snapshot_id & ACK_BITS_MASK,
             len(snapshot.entities),
+            len(snapshot.removed_entity_ids),
         )
     )
     for entity in snapshot.entities:
@@ -179,6 +195,7 @@ def snapshot_payload(snapshot: Snapshot) -> bytes:
             max(0, min(255, int(entity.health))),
             entity.flags & 0xFF,
         )
+    body += bytes(entity_id & 0xFF for entity_id in snapshot.removed_entity_ids)
     return bytes(body)
 
 
@@ -189,8 +206,10 @@ def pack_snapshot(header: Header, snapshot: Snapshot) -> bytes:
 def parse_snapshot(payload: memoryview) -> Snapshot:
     if len(payload) < _SNAPSHOT_HEAD.size:
         raise ProtocolError("short SNAPSHOT payload")
-    snapshot_id, base_snapshot_id, count = _SNAPSHOT_HEAD.unpack_from(payload, 0)
-    needed = _SNAPSHOT_HEAD.size + count * _ENTITY.size
+    snapshot_id, base_snapshot_id, count, removed_count = _SNAPSHOT_HEAD.unpack_from(
+        payload, 0
+    )
+    needed = _SNAPSHOT_HEAD.size + count * _ENTITY.size + removed_count
     if len(payload) < needed:
         raise ProtocolError("truncated SNAPSHOT payload")
     offset = _SNAPSHOT_HEAD.size
@@ -199,7 +218,8 @@ def parse_snapshot(payload: memoryview) -> Snapshot:
         entity_id, x, y, vx, vy, health, flags = _ENTITY.unpack_from(payload, offset)
         offset += _ENTITY.size
         entities.append(EntityState(entity_id, x, y, vx, vy, health, flags))
-    return Snapshot(snapshot_id, base_snapshot_id, tuple(entities))
+    removed = tuple(payload[offset : offset + removed_count])
+    return Snapshot(snapshot_id, base_snapshot_id, tuple(entities), removed)
 
 
 def pack_event(header: Header, event_id: int, event_type: int, data: bytes = b"") -> bytes:

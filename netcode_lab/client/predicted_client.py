@@ -106,7 +106,7 @@ class PredictedClient(GameClient):
             buttons=self.buttons,
         )
         header = self._header(proto.MsgType.INPUT)
-        self._send(proto.pack_input(header, (record,)))
+        self._send(proto.pack_input(header, self._inputs_to_send(record)))
 
         self._sent_packet_seqs.append(header.seq)
         self._sent_input_seqs.append(self.input_seq)
@@ -115,6 +115,11 @@ class PredictedClient(GameClient):
             del self._sent_input_seqs[0]
 
         self.predictor.apply_local_input(self.input_seq, self.move_x, self.move_y)
+
+    def _inputs_to_send(
+        self, record: proto.InputRecord
+    ) -> tuple[proto.InputRecord, ...]:
+        return (record,)
 
     async def _input_loop(self) -> None:
         # Deadline-based so inputs go out at the true tick rate. The C0 loop

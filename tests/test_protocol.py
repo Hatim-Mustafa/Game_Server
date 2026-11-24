@@ -29,12 +29,18 @@ class JoinTest(unittest.TestCase):
         header = proto.Header(proto.MsgType.JOIN, seq=1)
         decoded, payload = proto.decode(proto.pack_join(header, 2))
         self.assertEqual(decoded.msg_type, proto.MsgType.JOIN)
-        self.assertEqual(proto.parse_join(payload), 2)
+        self.assertEqual(proto.parse_join(payload), (2, 0))
 
     def test_default_slot_is_any(self) -> None:
         header = proto.Header(proto.MsgType.JOIN, seq=1)
         _, payload = proto.decode(proto.pack_join(header))
-        self.assertEqual(proto.parse_join(payload), 0)
+        self.assertEqual(proto.parse_join(payload), (0, 0))
+
+    def test_capabilities_round_trip(self) -> None:
+        header = proto.Header(proto.MsgType.JOIN, seq=1)
+        caps = int(proto.Capability.DELTA_SNAPSHOTS)
+        _, payload = proto.decode(proto.pack_join(header, 1, caps))
+        self.assertEqual(proto.parse_join(payload), (1, caps))
 
 
 class JoinAckTest(unittest.TestCase):
@@ -88,6 +94,17 @@ class SnapshotTest(unittest.TestCase):
         header = proto.Header(proto.MsgType.SNAPSHOT, seq=210)
         decoded, payload = proto.decode(proto.pack_snapshot(header, snapshot))
         self.assertEqual(decoded.msg_type, proto.MsgType.SNAPSHOT)
+        self.assertEqual(proto.parse_snapshot(payload), snapshot)
+
+    def test_delta_round_trip_with_removals(self) -> None:
+        snapshot = proto.Snapshot(
+            snapshot_id=13,
+            base_snapshot_id=11,
+            entities=(proto.EntityState(1, 111, 222, 0, 0),),
+            removed_entity_ids=(7, 9),
+        )
+        header = proto.Header(proto.MsgType.SNAPSHOT, seq=211)
+        _, payload = proto.decode(proto.pack_snapshot(header, snapshot))
         self.assertEqual(proto.parse_snapshot(payload), snapshot)
 
 

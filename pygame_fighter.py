@@ -6,6 +6,7 @@ import asyncio
 import pygame
 
 from netcode_lab.client.client import ClientConfig, GameClient
+from netcode_lab.client.compressed_client import CompressedClient
 from netcode_lab.client.interpolated_client import InterpolatedClient
 from netcode_lab.client.predicted_client import PredictedClient
 from netcode_lab.config import ServerConfig
@@ -49,13 +50,21 @@ def make_client(
     tick_rate: float,
     player_slot: int,
     interpolation_delay: float = 0.1,
+    redundancy: int = 3,
 ) -> GameClient:
     config = ClientConfig(
         host=host,
         port=port,
         input_rate=tick_rate,
         player_slot=player_slot,
+        redundancy=redundancy,
     )
+    if mode == "c3":
+        return CompressedClient(
+            config,
+            ServerConfig(tick_rate=tick_rate),
+            interpolation_delay=interpolation_delay,
+        )
     if mode == "c2":
         return InterpolatedClient(
             config,
@@ -104,6 +113,7 @@ async def run_game(
     tick_rate: float,
     player_slot: int,
     interpolation_delay: float = 0.1,
+    redundancy: int = 3,
 ) -> None:
     pygame.init()
     pygame.display.set_caption(
@@ -115,7 +125,13 @@ async def run_game(
     small_font = pygame.font.SysFont("consolas", 16)
 
     client = make_client(
-        mode, host, port, tick_rate, player_slot, interpolation_delay
+        mode,
+        host,
+        port,
+        tick_rate,
+        player_slot,
+        interpolation_delay,
+        redundancy,
     )
     client_task = asyncio.create_task(client.run())
 
@@ -207,6 +223,10 @@ async def run_game(
                 "c0": " (server state)",
                 "c1": " (prediction)",
                 "c2": f" (prediction + {interpolation_delay * 1000:.0f} ms interpolation)",
+                "c3": (
+                    f" (prediction + {interpolation_delay * 1000:.0f} ms interp"
+                    f" + redundancy {redundancy} + delta)"
+                ),
             }.get(mode, "")
             mode_text = small_font.render(
                 f"MODE {mode.upper()}{mode_note}   PLAYER {player_slot}",
@@ -334,25 +354,33 @@ def main() -> None:
     )
     parser.add_argument(
         "--mode",
-        choices=("c0", "c1", "c2"),
+        choices=("c0", "c1", "c2", "c3"),
         default="c0",
-        help="c0 = server state, c1 = prediction, c2 = prediction + interpolation",
+        help="c0 server state, c1 prediction, c2 +interpolation, c3 +redundancy/delta",
     )
     parser.add_argument(
         "--tick-rate",
         type=float,
         default=30.0,
-        help="server tick rate; c1/c2 must match the server's --tick-rate",
+        help="server tick rate; c1/c2/c3 must match the server's --tick-rate",
     )
     parser.add_argument(
         "--interpolation-delay-ms",
         type=float,
         default=100.0,
-        help="c2: how far behind the server timeline to render the opponent",
+        help="c2/c3: how far behind the server timeline to render the opponent",
+    )
+    parser.add_argument(
+        "--redundancy",
+        type=int,
+        default=3,
+        help="c3: how many recent inputs to repeat in each INPUT packet",
     )
     args = parser.parse_args()
     if args.interpolation_delay_ms < 0:
         parser.error("--interpolation-delay-ms must be non-negative")
+    if args.redundancy < 1:
+        parser.error("--redundancy must be at least 1")
 
     asyncio.run(
         run_game(
@@ -362,6 +390,7 @@ def main() -> None:
             args.tick_rate,
             args.player,
             args.interpolation_delay_ms / 1000.0,
+            args.redundancy,
         )
     )
 

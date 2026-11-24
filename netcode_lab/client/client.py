@@ -19,6 +19,7 @@ class ClientConfig:
     input_rate: float = 30.0
     join_retry_interval: float = 0.5
     player_slot: int = 0
+    redundancy: int = 3
 
     @property
     def input_interval(self) -> float:
@@ -31,6 +32,7 @@ class GameClient:
         self.server_addr: Addr = (config.host, config.port)
         self.transport: asyncio.DatagramTransport | None = None
         self.desired_player_id = config.player_slot & 0xFF
+        self.capabilities = 0
         self.rejected = False
         self.player_id: int | None = None
         self.server_ack = AckWindow()
@@ -39,7 +41,9 @@ class GameClient:
         self.tick = 0
         self.latest_snapshot: proto.Snapshot | None = None
         self.last_received_snapshot: proto.Snapshot | None = None
+        self.snapshot_cache: dict[int, proto.Snapshot] = {}
         self.snapshots_received = 0
+        self.deltas_received = 0
         self.joined = asyncio.Event()
         self.move_x = 0
         self.move_y = 0
@@ -110,19 +114,51 @@ class GameClient:
                     log.info("joined as player %d", self.player_id)
                     self.joined.set()
             elif header.msg_type is proto.MsgType.SNAPSHOT:
-                snapshot = proto.parse_snapshot(payload)
-                self.last_received_snapshot = snapshot
+                raw = proto.parse_snapshot(payload)
                 self.snapshots_received += 1
-                if self.latest_snapshot is None or seq_newer(
-                    snapshot.snapshot_id, self.latest_snapshot.snapshot_id
+                resolved = self._resolve_snapshot(raw)
+                self.last_received_snapshot = resolved
+                if resolved is not None and (
+                    self.latest_snapshot is None
+                    or seq_newer(resolved.snapshot_id, self.latest_snapshot.snapshot_id)
                 ):
-                    self.latest_snapshot = snapshot
+                    self.latest_snapshot = resolved
                     self.tick = header.tick
             elif header.msg_type is proto.MsgType.EVENT:
                 event_id, event_type, _ = proto.parse_event(payload)
                 log.info("event %d type %d", event_id, event_type)
         except proto.ProtocolError as exc:
             log.debug("bad payload: %s", exc)
+
+    def _resolve_snapshot(self, snapshot: proto.Snapshot) -> proto.Snapshot | None:
+        if snapshot.base_snapshot_id == 0:
+            resolved = snapshot
+        else:
+            base = self.snapshot_cache.get(snapshot.base_snapshot_id)
+            if base is None:
+                log.debug(
+                    "cannot apply delta snapshot %d: missing base %d",
+                    snapshot.snapshot_id,
+                    snapshot.base_snapshot_id,
+                )
+                return None
+            entities = {entity.entity_id: entity for entity in base.entities}
+            for entity in snapshot.entities:
+                entities[entity.entity_id] = entity
+            for entity_id in snapshot.removed_entity_ids:
+                entities.pop(entity_id, None)
+            resolved = proto.Snapshot(
+                snapshot_id=snapshot.snapshot_id,
+                base_snapshot_id=0,
+                entities=tuple(entities[entity_id] for entity_id in sorted(entities)),
+            )
+            self.deltas_received += 1
+
+        self.snapshot_cache[snapshot.snapshot_id] = resolved
+        while len(self.snapshot_cache) > 128:
+            oldest = next(iter(self.snapshot_cache))
+            del self.snapshot_cache[oldest]
+        return resolved
 
     def _next_seq(self) -> int:
         seq = self.local_seq
@@ -145,7 +181,11 @@ class GameClient:
 
     def _send_join(self) -> None:
         self._send(
-            proto.pack_join(self._header(proto.MsgType.JOIN), self.desired_player_id)
+            proto.pack_join(
+                self._header(proto.MsgType.JOIN),
+                self.desired_player_id,
+                self.capabilities,
+            )
         )
 
     def _send_leave(self) -> None:

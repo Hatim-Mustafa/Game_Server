@@ -17,6 +17,7 @@ class ServerConfig:
     attack_range: float = 90.0
     attack_cooldown: float = 0.55
     attack_duration: float = 0.18
+    delta_keyframe_interval: int = 20
 
     @property
     def tick_dt(self) -> float:

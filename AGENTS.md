@@ -11,7 +11,7 @@ compare netcode techniques empirically:
 - `C0` naive client (render server state)
 - `C1` client-side prediction + reconciliation (implemented)
 - `C2` entity interpolation of remote players (implemented)
-- `C3` input redundancy + delta compression (not yet implemented)
+- `C3` input redundancy + delta compression (implemented)
 - TCP baseline (not yet implemented)
 
 The course project spec is `docs/CN_Project_Proposal.pdf`. Concept notes are
@@ -36,18 +36,20 @@ in `docs/CONCEPTS.md`; the **frozen wire format** is `docs/PROTOCOL.md`.
 | Run headless client | `python -m netcode_lab.client --mode c0 --port 9000` |
 | Run C1 headless client | `python -m netcode_lab.client --mode c1 --tick-rate 30` |
 | Run C2 headless client | `python -m netcode_lab.client --mode c2 --tick-rate 30 --interpolation-delay-ms 100` |
+| Run C3 headless client | `python -m netcode_lab.client --mode c3 --tick-rate 30 --redundancy 3` |
 | Run pygame, player 1 | `python pygame_fighter.py --player 1 --mode c0` |
 | Run pygame, player 2 | `python pygame_fighter.py --player 2 --mode c0` |
 | Run pygame in C2 | `python pygame_fighter.py --player 1 --mode c2 --tick-rate 30` |
+| Run pygame in C3 | `python pygame_fighter.py --player 1 --mode c3 --tick-rate 30` |
 | Run all tests | `python -m unittest discover -s tests -v` |
 | Quick syntax check | `python -m py_compile <file>` |
 
 Server flags: `--host --port --tick-rate --snapshot-rate --log-level`.
-Client flags: `--host --port --mode {c0,c1,c2} --tick-rate
---interpolation-delay-ms --player --duration --input-rate --print-interval
---csv --log-level`.
-Game flags: `--player {1,2}` (required), `--mode {c0,c1,c2}`, `--tick-rate`,
-`--interpolation-delay-ms`, `--host`, `--port`.
+Client flags: `--host --port --mode {c0,c1,c2,c3} --tick-rate
+--interpolation-delay-ms --redundancy --player --duration --input-rate
+--print-interval --csv --log-level`.
+Game flags: `--player {1,2}` (required), `--mode {c0,c1,c2,c3}`, `--tick-rate`,
+`--interpolation-delay-ms`, `--redundancy`, `--host`, `--port`.
 
 There is **no configured linter or formatter**. Verify changes with the test
 suite and `py_compile`.
@@ -70,8 +72,9 @@ netcode_lab/
     prediction.py         pure Predictor logic and correction stats
     interpolated_client.py C2 client (C1 + delayed remote interpolation)
     interpolation.py      pure SnapshotInterpolator logic
+    compressed_client.py  C3 client (C2 + redundancy + delta capability)
     bot.py                headless patrol bot + CSV reporting
-    __main__.py           client CLI (--mode c0/c1/c2)
+    __main__.py           client CLI (--mode c0/c1/c2/c3)
 pygame_fighter.py         one window per player; renders server state
 tests/                    unit + integration tests
 docs/                     proposal, concepts, protocol
@@ -99,12 +102,19 @@ docs/                     proposal, concepts, protocol
   replace it (out-of-order UDP packets must not roll state back). The actual
   last-received snapshot is kept in `last_received_snapshot` for the
   interpolator, which needs the packet's own tick.
+- C3 = C2 + input redundancy + delta snapshots. The client repeats the last N
+  inputs in each INPUT packet (server dedupes by `input_seq`) and advertises
+  `Capability.DELTA_SNAPSHOTS` in JOIN. The server then sends a delta against
+  the newest snapshot the client acknowledged (mapped from the header `ack`),
+  plus a full keyframe every `ServerConfig.delta_keyframe_interval`
+  snapshots. `GameClient` reconstructs deltas into full snapshots before
+  prediction/interpolation see them.
 
 ## Non-negotiable rules
 
 1. **Wire format changes require a version bump.** Update `VERSION` in
    `netcode_lab/protocol/messages.py`, update `docs/PROTOCOL.md`, and update
-   affected tests in the same change. Currently `VERSION = 3`.
+   affected tests in the same change. Currently `VERSION = 4`.
 2. **Keep client and server movement identical.** `Predictor.step`
    (`prediction.py`) must mirror `World.tick` (`world.py`): same speed, same
    diagonal normalisation, same clamping. Otherwise every snapshot causes a
@@ -148,6 +158,10 @@ docs/                     proposal, concepts, protocol
   snapshot's tick on arrival. Health/flags are taken from the newest snapshot,
   not the delayed timeline, so a remote can show damage slightly before the
   delayed punch pose reaches the target.
+- C3 delta compression is entity-granular, so a moving player is still sent
+  whole; savings come from idle/unchanged entities. C3 redundancy recovers up
+  to N-1 consecutive lost INPUT packets (one input interval of extra latency
+  if the newest packet is lost).
 
 ## When adding a feature
 
