@@ -29,9 +29,12 @@ netcode_lab/
     interpolated_client.py  C2 client (C1 + remote interpolation)
     interpolation.py     snapshot interpolator
     compressed_client.py   C3 client (C2 + redundancy + delta snapshots)
+    metrics.py           client metrics (jitter, stalls, bytes, latency, error)
     bot.py             headless patrol bot and reporting
     __main__.py        command-line entry point
-tests/                 protocol, ack window, world and integration tests
+topology/              Linux netns + veth + routing + tc netem scripts
+experiments/           experiment runner + aggregator (mean/std tables/plots)
+tests/                 protocol, netcode, events, metrics, experiment tests
 docs/                  concept and protocol notes
 ```
 
@@ -163,6 +166,90 @@ The server applies attack damage only on the rising edge of the attack
 button, when the target is within `attack_range` and the cooldown has
 expired. Health (`0..100`), the attacking flag and the dead flag are carried
 in each snapshot; see `docs/PROTOCOL.md`.
+
+## Reliable events
+
+Join/leave/KO/rematch are sent as `EVENT` messages on a small acknowledged
+channel: the server retransmits until the client's `EVENT_ACK` covers them
+(see `docs/PROTOCOL.md`). Snapshots remain the authoritative state; events are
+for discrete moments that a newer snapshot cannot replace.
+
+## Network topology (Ubuntu VM)
+
+The routed, impair-able topology lives in `topology/` and requires Linux
+(root). It creates five namespaces (`clientA`, `r1`, `r2`, `clientB`,
+`server`) on four subnets:
+
+```
+clientA 10.0.1.10 -- r1 10.0.1.1/10.0.12.1 -- r2 10.0.12.2/10.0.2.1/10.0.3.1
+clientB 10.0.2.10 -- r2 -- server 10.0.3.10
+```
+
+On Linux after cloning, make them executable (`chmod +x topology/*.sh`) or
+invoke them with `bash`:
+
+```
+sudo bash topology/setup.sh          # build namespaces, links, routes
+sudo bash topology/verify.sh         # routes, ping, traceroute and a UDP probe
+sudo bash topology/netem.sh apply --rtt-ms 100 --loss 2
+sudo bash topology/netem.sh status
+sudo bash topology/netem.sh clear    # remove impairment
+sudo bash topology/teardown.sh       # delete everything
+```
+
+`netem.sh` applies the condition on both router-to-router hops, so
+`--rtt-ms` is split evenly (e.g. 100 ms RTT = 50 ms per hop). Run the game
+inside the namespaces:
+
+```
+sudo ip netns exec server  python3 -m netcode_lab.server --host 10.0.3.10 --port 9000
+sudo ip netns exec clientA python3 -m netcode_lab.client --mode c3 --host 10.0.3.10 --port 9000 --player 1
+sudo ip netns exec clientB python3 -m netcode_lab.client --mode c3 --host 10.0.3.10 --port 9000 --player 2
+```
+
+## Metrics and experiments
+
+Every headless client writes a CSV trace and a sibling `*.summary.json` with:
+
+- snapshot rate, inter-arrival **jitter**, **stall** count, snapshot gaps,
+- **bytes sent/received** (and per-second averages) per player,
+- **input-to-visible latency** (command change → rendered local velocity
+  change) and its mean,
+- **position error** (rendered vs newest authoritative position),
+- correction rate/size (C1+), deltas received (C3), events received.
+
+Run a whole experiment (conditions × modes × runs; 60 s × 3 by default):
+
+```
+python -m experiments.run
+python -m experiments.aggregate
+```
+
+Useful options:
+
+```
+python -m experiments.run --conditions rtt20:20:0,rtt100:100:0,rtt200:200:0 \
+    --modes c0,c1,c2,c3 --runs 3 --duration 60
+python -m experiments.run --conditions local:0:0 --modes c0,c1 --runs 1 --duration 5
+```
+
+On the Linux VM, run over the routed topology and apply impairment per
+condition (needs passwordless `sudo -n` and `topology/setup.sh` first):
+
+```
+sudo python -m experiments.run --netns --apply-netem \
+    --conditions rtt100:100:0,loss2:50:2,loss5:50:5 --modes c0,c1,c2,c3 --runs 3
+python -m experiments.aggregate
+```
+
+Results go to `results/exp_<timestamp>/<condition>/<mode>/run<N>/` with
+`player1.csv`, `player2.csv`, `*.summary.json`, logs and `meta.json`.
+`experiments.aggregate` writes `summary.csv`, `summary.md`, and (if
+`matplotlib` is installed) `plots/` with mean ± std error bars.
+
+Notes: C0 position error is 0 by construction (it draws the last snapshot);
+C1+ includes the intentional prediction lead. Use `correction_rate` /
+`correction_*_px` for actual misprediction.
 
 ## Tests
 

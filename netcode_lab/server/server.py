@@ -18,6 +18,15 @@ SENT_SEQ_HISTORY_SIZE = 256
 
 
 @dataclass
+class PendingEvent:
+    event_id: int
+    event_type: int
+    data: bytes
+    last_sent: float
+    attempts: int
+
+
+@dataclass
 class Session:
     player_id: int
     addr: Addr
@@ -26,6 +35,8 @@ class Session:
     delta_enabled: bool = False
     acked_snapshot_id: int = 0
     sent_snapshots: dict[int, int] = field(default_factory=dict)
+    next_event_id: int = 1
+    pending_events: dict[int, PendingEvent] = field(default_factory=dict)
 
 
 class GameServer:
@@ -49,6 +60,7 @@ class GameServer:
         self.snapshot_id = 0
         self.snapshot_history: dict[int, dict[int, proto.EntityState]] = {}
         self._snapshot_history_order: list[int] = []
+        self._prev_health: dict[int, int] = {}
         self._next_player_id = 1
         self._running = False
 
@@ -84,6 +96,8 @@ class GameServer:
             self._on_join(addr, payload)
         elif header.msg_type is proto.MsgType.INPUT:
             self._on_input(payload, session)
+        elif header.msg_type is proto.MsgType.EVENT_ACK:
+            self._on_event_ack(payload, session)
         elif header.msg_type is proto.MsgType.LEAVE:
             self._on_leave(addr)
 
@@ -127,6 +141,8 @@ class GameServer:
             session.delta_enabled,
         )
         self._send_join_ack(session)
+        self._prev_health[player_id] = self.world.entities[player_id].health
+        self._broadcast_event(proto.EventType.PLAYER_JOINED, bytes([player_id]))
 
     def _on_input(self, payload: memoryview, session: Session | None) -> None:
         if session is None:
@@ -151,7 +167,79 @@ class GameServer:
             return
         self.sessions_by_player.pop(session.player_id, None)
         self.world.remove(session.player_id)
+        self._prev_health.pop(session.player_id, None)
         log.info("player %d left (%s)", session.player_id, addr)
+        self._broadcast_event(proto.EventType.PLAYER_LEFT, bytes([session.player_id]))
+
+    def _broadcast_event(self, event_type: int, data: bytes = b"") -> None:
+        for session in self.sessions_by_player.values():
+            self._queue_event(session, event_type, data)
+
+    def _queue_event(self, session: Session, event_type: int, data: bytes) -> None:
+        now = time.monotonic()
+        event = PendingEvent(
+            event_id=session.next_event_id,
+            event_type=int(event_type),
+            data=data,
+            last_sent=now,
+            attempts=0,
+        )
+        session.next_event_id += 1
+        session.pending_events[event.event_id] = event
+        self._send_event(session, event, now)
+
+    def _send_event(self, session: Session, event: PendingEvent, now: float) -> None:
+        header = self._header(proto.MsgType.EVENT, session)
+        packet = proto.pack_event(
+            header, event.event_id, event.event_type, event.data
+        )
+        self._send(session.addr, packet)
+        event.last_sent = now
+        event.attempts += 1
+
+    def _retry_events(self, now: float | None = None) -> None:
+        now = time.monotonic() if now is None else now
+        interval = self.config.event_retry_interval
+        for session in self.sessions_by_player.values():
+            for event_id in list(session.pending_events):
+                event = session.pending_events[event_id]
+                if now - event.last_sent < interval:
+                    continue
+                if event.attempts >= self.config.event_max_retries:
+                    del session.pending_events[event_id]
+                    log.warning(
+                        "dropping event %d for player %d after %d attempts",
+                        event_id,
+                        session.player_id,
+                        event.attempts,
+                    )
+                    continue
+                self._send_event(session, event, now)
+
+    def _on_event_ack(self, payload: memoryview, session: Session | None) -> None:
+        if session is None:
+            return
+        try:
+            ack, ack_bits = proto.parse_event_ack(payload)
+        except proto.ProtocolError as exc:
+            log.debug("bad EVENT_ACK from %s: %s", session.addr, exc)
+            return
+        if ack == 0:
+            return
+        for event_id in list(session.pending_events):
+            offset = ack - event_id
+            acknowledged = offset == 0 or (
+                1 <= offset <= 32 and bool(ack_bits & (1 << (offset - 1)))
+            )
+            if acknowledged or offset >= 32:
+                del session.pending_events[event_id]
+
+    def _detect_events(self) -> None:
+        for player_id, entity in self.world.entities.items():
+            previous = self._prev_health.get(player_id, entity.health)
+            if previous > 0 and entity.health <= 0:
+                self._broadcast_event(proto.EventType.KO, bytes([player_id]))
+            self._prev_health[player_id] = entity.health
 
     def _allocate_player_id(self, desired: int) -> int | None:
         if desired:
@@ -296,9 +384,13 @@ class GameServer:
             if self.world.rematch_requested:
                 if self.world.game_over:
                     self.world.rematch()
+                    for player_id, entity in self.world.entities.items():
+                        self._prev_health[player_id] = entity.health
+                    self._broadcast_event(proto.EventType.REMATCH, b"")
                     log.info("rematch")
                 else:
                     self.world.rematch_requested = False
+            self._detect_events()
             next_deadline += dt
             await asyncio.sleep(max(0.0, next_deadline - time.monotonic()))
 
@@ -307,6 +399,7 @@ class GameServer:
         next_deadline = time.monotonic() + interval
         while self._running:
             self._broadcast_snapshot()
+            self._retry_events()
             next_deadline += interval
             now = time.monotonic()
             if next_deadline < now:

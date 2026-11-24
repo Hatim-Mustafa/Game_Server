@@ -109,8 +109,8 @@ class SnapshotCombatFieldTest(unittest.TestCase):
         _, payload = proto.decode(proto.pack_snapshot(header, snapshot))
         self.assertEqual(proto.parse_snapshot(payload), snapshot)
 
-    def test_protocol_version_is_four(self) -> None:
-        self.assertEqual(proto.VERSION, 4)
+    def test_protocol_version_is_five(self) -> None:
+        self.assertEqual(proto.VERSION, 5)
 
 
 if __name__ == "__main__":

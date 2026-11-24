@@ -1,6 +1,6 @@
-# NetCode Lab — Wire Protocol (v4)
+# NetCode Lab — Wire Protocol (v5)
 
-Status: **frozen at v4**. This document is the single source of truth for the binary
+Status: **frozen at v5**. This document is the single source of truth for the binary
 format. The reference implementation lives in
 `netcode_lab/protocol/messages.py`. Any breaking change requires bumping
 `VERSION` in that module and updating this document in the same commit.
@@ -18,7 +18,7 @@ format. The reference implementation lives in
 | Offset | Size | Field        | Type   | Meaning |
 |-------:|-----:|--------------|--------|---------|
 | 0      | 4    | `protocol_id`| uint32 | Always `0x4E433031` (ASCII `NC01`) |
-| 4      | 1    | `version`    | uint8  | Always `4` |
+| 4      | 1    | `version`    | uint8  | Always `5` |
 | 5      | 1    | `msg_type`   | uint8  | See message table |
 | 6      | 4    | `seq`        | uint32 | Sender's packet sequence number |
 | 10     | 4    | `ack`        | uint32 | Highest `seq` received from the peer |
@@ -59,8 +59,9 @@ Example: received sequences 3, 4, 6. Then `ack = 6`,
 | 2          | `JOIN_ACK` | server → client | assigned player id (`0` = denied) |
 | 3          | `INPUT`    | client → server | input records |
 | 4          | `SNAPSHOT` | server → client | snapshot |
-| 5          | `EVENT`    | server → client | event |
+| 5          | `EVENT`    | server → client | reliable event |
 | 6          | `LEAVE`    | client → server | none |
+| 7          | `EVENT_ACK`| client → server | acknowledged event ids |
 
 Senders must use the direction listed. Unexpected directions are ignored by
 the receiver.
@@ -188,13 +189,35 @@ Each entity record (11 bytes, format `<BhhhhBB`):
 | 26     | 1    | `event_type` | uint8  | Application-defined |
 | 27     | ...  | `data`       | bytes  | Opaque, length = remainder |
 
-Reserved for the reliable event channel. No `event_type` values are defined
-in v4; KO is derived from `health == 0` in snapshots.
+Discrete events that cannot be replaced by a newer snapshot are delivered on
+a small reliable channel. The server numbers events **per session** starting
+at `1`, sends each `EVENT`, and retransmits it every `event_retry_interval`
+until the client acknowledges it or `event_max_retries` is reached. The client
+acknowledges via `EVENT_ACK`.
 
-### 6. LEAVE (client → server)
+`event_type` values:
+
+| Value | Name            | `data` |
+|------:|-----------------|--------|
+| 1     | `PLAYER_JOINED` | 1 byte player id |
+| 2     | `PLAYER_LEFT`   | 1 byte player id |
+| 3     | `KO`            | 1 byte player id of the player who reached 0 health |
+| 4     | `REMATCH`       | empty |
+
+### 6. EVENT_ACK (client → server)
+
+| Offset | Size | Field       | Type   | Meaning |
+|-------:|-----:|-------------|--------|---------|
+| 22     | 4    | `event_ack` | uint32 | Highest event id received |
+| 26     | 4    | `event_bits`| uint32 | Bitmap of earlier event ids |
+
+Struct: `<II`. Uses the same semantics as the packet header: bit `i` (0 = LSB)
+acknowledges event id `event_ack - 1 - i`.
+
+### 7. LEAVE (client → server)
 
 Header only. Announces an intentional disconnect. Best-effort; the server
-also removes a client on its own timeout policy (not implemented in v4).
+also removes a client on its own timeout policy (not implemented in v5).
 
 ## Worked example
 
@@ -203,7 +226,7 @@ also removes a client on its own timeout policy (not implemented in v4).
 
 ```
 31 30 43 4E   protocol_id = "NC01"
-04            version
+05            version
 02            msg_type = JOIN_ACK
 00 00 00 00   seq = 0
 01 00 00 00   ack = 1
@@ -212,7 +235,7 @@ also removes a client on its own timeout policy (not implemented in v4).
 01            player_id = 1
 ```
 
-## Known v4 simplifications
+## Known v5 simplifications
 
 - The server's `seq` is a single global counter shared across all clients.
   As a result a client can observe gaps caused by packets sent to other
@@ -228,3 +251,6 @@ also removes a client on its own timeout policy (not implemented in v4).
   is over; there is no confirmation handshake.
 - There is no rejoin-with-same-id handshake beyond `JOIN`; a client that
   disconnects without `LEAVE` holds its slot until the server adds a timeout.
+- Reliable events are retried at a fixed interval up to a bounded number of
+  attempts; events older than the 32-entry ack window are treated as received
+  if the client's ack has moved past them.

@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections import deque
 from dataclasses import dataclass
 
+from netcode_lab.client.metrics import ClientMetrics
 from netcode_lab.protocol import messages as proto
 from netcode_lab.protocol.ack import AckWindow, seq_newer
 
@@ -20,6 +22,7 @@ class ClientConfig:
     join_retry_interval: float = 0.5
     player_slot: int = 0
     redundancy: int = 3
+    stall_threshold_ms: float = 250.0
 
     @property
     def input_interval(self) -> float:
@@ -44,6 +47,13 @@ class GameClient:
         self.snapshot_cache: dict[int, proto.Snapshot] = {}
         self.snapshots_received = 0
         self.deltas_received = 0
+        self.event_ack = AckWindow()
+        self.events: deque[tuple[int, int, bytes]] = deque(maxlen=64)
+        self.events_received = 0
+        self.last_event: tuple[int, int, bytes] | None = None
+        self.metrics = ClientMetrics(
+            stall_threshold=self.config.stall_threshold_ms / 1000.0
+        )
         self.joined = asyncio.Event()
         self.move_x = 0
         self.move_y = 0
@@ -116,6 +126,7 @@ class GameClient:
             elif header.msg_type is proto.MsgType.SNAPSHOT:
                 raw = proto.parse_snapshot(payload)
                 self.snapshots_received += 1
+                self.metrics.record_snapshot(raw.snapshot_id)
                 resolved = self._resolve_snapshot(raw)
                 self.last_received_snapshot = resolved
                 if resolved is not None and (
@@ -125,8 +136,13 @@ class GameClient:
                     self.latest_snapshot = resolved
                     self.tick = header.tick
             elif header.msg_type is proto.MsgType.EVENT:
-                event_id, event_type, _ = proto.parse_event(payload)
+                event_id, event_type, event_data = proto.parse_event(payload)
+                self.event_ack.mark(event_id)
+                self.events_received += 1
+                self.last_event = (event_id, event_type, event_data)
+                self.events.append(self.last_event)
                 log.info("event %d type %d", event_id, event_type)
+                self._send_event_ack()
         except proto.ProtocolError as exc:
             log.debug("bad payload: %s", exc)
 
@@ -178,6 +194,7 @@ class GameClient:
     def _send(self, packet: bytes) -> None:
         if self.transport is not None:
             self.transport.sendto(packet, self.server_addr)
+            self.metrics.record_sent(len(packet))
 
     def _send_join(self) -> None:
         self._send(
@@ -191,6 +208,13 @@ class GameClient:
     def _send_leave(self) -> None:
         if self.transport is not None:
             self._send(proto.pack_leave(self._header(proto.MsgType.LEAVE)))
+
+    def _send_event_ack(self) -> None:
+        if self.transport is None:
+            return
+        ack, ack_bits = self.event_ack.build()
+        header = self._header(proto.MsgType.EVENT_ACK)
+        self._send(proto.pack_event_ack(header, ack, ack_bits))
 
     def _send_input(self) -> None:
         self.input_seq = (self.input_seq + 1) & 0xFFFFFFFF
@@ -225,6 +249,7 @@ class _ClientProtocol(asyncio.DatagramProtocol):
         self.client = client
 
     def datagram_received(self, data: bytes, addr: Addr) -> None:
+        self.client.metrics.record_received(len(data))
         self.client.handle_datagram(data)
 
     def error_received(self, exc: Exception) -> None:

@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from enum import IntEnum, IntFlag
 
 PROTOCOL_ID = 0x4E433031
-VERSION = 4
+VERSION = 5
 ACK_BITS_MASK = 0xFFFFFFFF
 
 HEADER = struct.Struct("<IBBIIII")
@@ -18,6 +18,7 @@ _INPUT = struct.Struct("<IIbbB")
 _SNAPSHOT_HEAD = struct.Struct("<IIBB")
 _ENTITY = struct.Struct("<BhhhhBB")
 _EVENT_HEAD = struct.Struct("<IB")
+_EVENT_ACK = struct.Struct("<II")
 
 FLAG_ATTACKING = 1 << 0
 FLAG_DEAD = 1 << 1
@@ -43,6 +44,14 @@ class MsgType(IntEnum):
     SNAPSHOT = 4
     EVENT = 5
     LEAVE = 6
+    EVENT_ACK = 7
+
+
+class EventType(IntEnum):
+    PLAYER_JOINED = 1
+    PLAYER_LEFT = 2
+    KO = 3
+    REMATCH = 4
 
 
 @dataclass(frozen=True)
@@ -231,6 +240,19 @@ def parse_event(payload: memoryview) -> tuple[int, int, bytes]:
         raise ProtocolError("short EVENT payload")
     event_id, event_type = _EVENT_HEAD.unpack_from(payload, 0)
     return event_id, event_type, bytes(payload[_EVENT_HEAD.size:])
+
+
+def pack_event_ack(header: Header, ack: int, ack_bits: int) -> bytes:
+    return encode(
+        header,
+        _EVENT_ACK.pack(ack & ACK_BITS_MASK, ack_bits & ACK_BITS_MASK),
+    )
+
+
+def parse_event_ack(payload: memoryview) -> tuple[int, int]:
+    if len(payload) < _EVENT_ACK.size:
+        raise ProtocolError("short EVENT_ACK payload")
+    return _EVENT_ACK.unpack_from(payload, 0)
 
 
 def pack_leave(header: Header) -> bytes:

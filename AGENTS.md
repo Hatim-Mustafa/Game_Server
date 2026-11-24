@@ -43,6 +43,14 @@ in `docs/CONCEPTS.md`; the **frozen wire format** is `docs/PROTOCOL.md`.
 | Run pygame in C3 | `python pygame_fighter.py --player 1 --mode c3 --tick-rate 30` |
 | Run all tests | `python -m unittest discover -s tests -v` |
 | Quick syntax check | `python -m py_compile <file>` |
+| Build netns topology (Linux) | `sudo topology/setup.sh` |
+| Verify topology | `sudo topology/verify.sh` |
+| Apply impairment | `sudo topology/netem.sh apply --rtt-ms 100 --loss 2` |
+| Clear impairment | `sudo topology/netem.sh clear` |
+| Tear down topology | `sudo topology/teardown.sh` |
+| Run experiments | `python -m experiments.run --conditions local:0:0 --modes c0,c1 --runs 1 --duration 5` |
+| Run over netns with netem | `sudo python -m experiments.run --netns --apply-netem` |
+| Aggregate results | `python -m experiments.aggregate` |
 
 Server flags: `--host --port --tick-rate --snapshot-rate --log-level`.
 Client flags: `--host --port --mode {c0,c1,c2,c3} --tick-rate
@@ -73,9 +81,12 @@ netcode_lab/
     interpolated_client.py C2 client (C1 + delayed remote interpolation)
     interpolation.py      pure SnapshotInterpolator logic
     compressed_client.py  C3 client (C2 + redundancy + delta capability)
-    bot.py                headless patrol bot + CSV reporting
+    metrics.py            client metrics (jitter/stalls/bytes/latency/error)
+    bot.py                headless patrol bot + CSV + summary JSON
     __main__.py           client CLI (--mode c0/c1/c2/c3)
 pygame_fighter.py         one window per player; renders server state
+topology/                 netns + veth + routing + tc netem scripts
+experiments/              experiment runner + aggregator
 tests/                    unit + integration tests
 docs/                     proposal, concepts, protocol
 ```
@@ -109,12 +120,31 @@ docs/                     proposal, concepts, protocol
   plus a full keyframe every `ServerConfig.delta_keyframe_interval`
   snapshots. `GameClient` reconstructs deltas into full snapshots before
   prediction/interpolation see them.
+- Discrete events (join/leave/KO/rematch) use a per-session reliable channel:
+  the server numbers `EVENT`s, retransmits until `EVENT_ACK` covers them, and
+  gives up after `event_max_retries`. Do not move supersedable state onto this
+  channel; snapshots own state.
+
+## Metrics and experiments
+
+- `netcode_lab/client/metrics.py` collects snapshot rate/jitter/stalls/gaps,
+  bytes sent/received, input-to-visible latency, and rendered-vs-authoritative
+  position error. It is fed by `GameClient` and the headless bot.
+- The bot writes `*.csv` plus a sibling `*.summary.json` per client run. The
+  aggregator reads the summary JSONs, groups by (condition, mode), and writes
+  `summary.csv`, `summary.md`, and optional `plots/`.
+- `experiments/run.py` drives conditions × modes × runs, can run inside the
+  topology namespaces (`--netns`) and apply `netem` (`--apply-netem`, needs
+  passwordless `sudo -n`), and records `meta.json` per run.
+- Results live under `results/`, which is gitignored; do not commit them.
+- C0 position error is 0 by construction; C1+ includes prediction lead. Use
+  correction metrics for misprediction and latency for responsiveness.
 
 ## Non-negotiable rules
 
 1. **Wire format changes require a version bump.** Update `VERSION` in
    `netcode_lab/protocol/messages.py`, update `docs/PROTOCOL.md`, and update
-   affected tests in the same change. Currently `VERSION = 4`.
+   affected tests in the same change. Currently `VERSION = 5`.
 2. **Keep client and server movement identical.** `Predictor.step`
    (`prediction.py`) must mirror `World.tick` (`world.py`): same speed, same
    diagonal normalisation, same clamping. Otherwise every snapshot causes a
@@ -135,7 +165,9 @@ docs/                     proposal, concepts, protocol
 - `asyncio` for all networking; no threads.
 - Logging via module-level `log = logging.getLogger(__name__)`.
 - Tests are organized by concern: `test_protocol.py`, `test_world.py`,
-  `test_combat.py`, `test_prediction.py`, `test_integration.py`.
+  `test_combat.py`, `test_prediction.py`, `test_interpolation.py`,
+  `test_c3.py`, `test_events.py`, `test_metrics.py`, `test_experiments.py`,
+  `test_integration.py`.
 - Keep gameplay constants in `ServerConfig` (and mirror them in the
   predictor), not scattered literals.
 
@@ -162,6 +194,16 @@ docs/                     proposal, concepts, protocol
   whole; savings come from idle/unchanged entities. C3 redundancy recovers up
   to N-1 consecutive lost INPUT packets (one input interval of extra latency
   if the newest packet is lost).
+- `topology/` requires Linux root and a real kernel with `sch_netem`; it will
+  not work on Windows or reliably under WSL2. The game and tests still run on
+  Windows.
+- Reliable events are best-effort after `event_max_retries` (default 20 at
+  0.25 s); they are not a general-purpose guaranteed channel.
+- `experiments.run` without `--apply-netem` still labels conditions (e.g.
+  `rtt100`) but the impairment is not applied; `meta.json` records
+  `netem_applied`, so never present un-impaired runs as impaired.
+- `--netns --apply-netem` requires root and passwordless `sudo -n`; run
+  `topology/setup.sh` first. `sys.executable` runs inside the namespaces.
 
 ## When adding a feature
 

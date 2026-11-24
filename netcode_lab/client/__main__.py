@@ -54,6 +54,18 @@ def main(argv: list[str] | None = None) -> None:
         help="inputs per second (default: same as --tick-rate)",
     )
     parser.add_argument("--print-interval", type=float, default=0.5)
+    parser.add_argument(
+        "--patrol-period",
+        type=float,
+        default=1.5,
+        help="seconds between automatic direction changes in the headless bot",
+    )
+    parser.add_argument(
+        "--stall-threshold-ms",
+        type=float,
+        default=250.0,
+        help="snapshot inter-arrival gap counted as a stall",
+    )
     parser.add_argument("--csv", default=None)
     parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args(argv)
@@ -72,6 +84,7 @@ def main(argv: list[str] | None = None) -> None:
         input_rate=args.input_rate if args.input_rate is not None else args.tick_rate,
         player_slot=args.player,
         redundancy=args.redundancy,
+        stall_threshold_ms=args.stall_threshold_ms,
     )
     if args.mode == "c3":
         client = CompressedClient(
@@ -96,6 +109,7 @@ def main(argv: list[str] | None = None) -> None:
                 duration=args.duration,
                 print_interval=args.print_interval,
                 csv_path=args.csv,
+                patrol_period=args.patrol_period,
             )
         )
     except KeyboardInterrupt:

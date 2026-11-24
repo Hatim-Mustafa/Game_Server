@@ -108,6 +108,23 @@ class SnapshotTest(unittest.TestCase):
         self.assertEqual(proto.parse_snapshot(payload), snapshot)
 
 
+class EventTest(unittest.TestCase):
+    def test_event_ack_round_trip(self) -> None:
+        header = proto.Header(proto.MsgType.EVENT_ACK, seq=3)
+        _, payload = proto.decode(proto.pack_event_ack(header, 7, 0b101))
+        self.assertEqual(proto.parse_event_ack(payload), (7, 0b101))
+
+    def test_event_round_trip(self) -> None:
+        header = proto.Header(proto.MsgType.EVENT, seq=1)
+        _, payload = proto.decode(
+            proto.pack_event(header, 4, int(proto.EventType.KO), b"\x02")
+        )
+        event_id, event_type, data = proto.parse_event(payload)
+        self.assertEqual(event_id, 4)
+        self.assertEqual(event_type, int(proto.EventType.KO))
+        self.assertEqual(data, b"\x02")
+
+
 class AckWindowTest(unittest.TestCase):
     def test_out_of_order_marks(self) -> None:
         window = AckWindow()
