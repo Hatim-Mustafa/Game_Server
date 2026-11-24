@@ -6,6 +6,7 @@ import asyncio
 import pygame
 
 from netcode_lab.client.client import ClientConfig, GameClient
+from netcode_lab.client.interpolated_client import InterpolatedClient
 from netcode_lab.client.predicted_client import PredictedClient
 from netcode_lab.config import ServerConfig
 from netcode_lab.protocol.messages import (
@@ -41,19 +42,36 @@ def get_direction(
     return move_x, move_y
 
 
-def make_client(mode: str, host: str, port: int, tick_rate: float, player_slot: int) -> GameClient:
+def make_client(
+    mode: str,
+    host: str,
+    port: int,
+    tick_rate: float,
+    player_slot: int,
+    interpolation_delay: float = 0.1,
+) -> GameClient:
     config = ClientConfig(
         host=host,
         port=port,
         input_rate=tick_rate,
         player_slot=player_slot,
     )
+    if mode == "c2":
+        return InterpolatedClient(
+            config,
+            ServerConfig(tick_rate=tick_rate),
+            interpolation_delay=interpolation_delay,
+        )
     if mode == "c1":
         return PredictedClient(config, ServerConfig(tick_rate=tick_rate))
     return GameClient(config)
 
 
 def remote_entity(client: GameClient) -> EntityState | None:
+    get_remote = getattr(client, "get_remote_entities", None)
+    if get_remote is not None:
+        remotes = get_remote()
+        return remotes[0] if remotes else None
     snapshot = client.latest_snapshot
     if snapshot is None or client.player_id is None:
         return None
@@ -79,7 +97,14 @@ def entity_color(entity_id: int) -> tuple[int, int, int]:
     return PLAYER_ONE if entity_id % 2 == 1 else PLAYER_TWO
 
 
-async def run_game(host: str, port: int, mode: str, tick_rate: float, player_slot: int) -> None:
+async def run_game(
+    host: str,
+    port: int,
+    mode: str,
+    tick_rate: float,
+    player_slot: int,
+    interpolation_delay: float = 0.1,
+) -> None:
     pygame.init()
     pygame.display.set_caption(
         f"NetCode Lab - Player {player_slot} ({mode.upper()}, server authoritative)"
@@ -89,7 +114,9 @@ async def run_game(host: str, port: int, mode: str, tick_rate: float, player_slo
     font = pygame.font.SysFont("consolas", 22)
     small_font = pygame.font.SysFont("consolas", 16)
 
-    client = make_client(mode, host, port, tick_rate, player_slot)
+    client = make_client(
+        mode, host, port, tick_rate, player_slot, interpolation_delay
+    )
     client_task = asyncio.create_task(client.run())
 
     running = True
@@ -176,10 +203,13 @@ async def run_game(host: str, port: int, mode: str, tick_rate: float, player_slo
 
             title = font.render(status, True, (255, 226, 112))
             screen.blit(title, title.get_rect(center=(WIDTH // 2, 85)))
+            mode_note = {
+                "c0": " (server state)",
+                "c1": " (prediction)",
+                "c2": f" (prediction + {interpolation_delay * 1000:.0f} ms interpolation)",
+            }.get(mode, "")
             mode_text = small_font.render(
-                f"MODE {mode.upper()}"
-                + (" (prediction)" if mode == "c1" else " (server state)")
-                + f"   PLAYER {player_slot}",
+                f"MODE {mode.upper()}{mode_note}   PLAYER {player_slot}",
                 True,
                 (150, 160, 200),
             )
@@ -304,19 +334,36 @@ def main() -> None:
     )
     parser.add_argument(
         "--mode",
-        choices=("c0", "c1"),
+        choices=("c0", "c1", "c2"),
         default="c0",
-        help="c0 = show server state, c1 = client-side prediction",
+        help="c0 = server state, c1 = prediction, c2 = prediction + interpolation",
     )
     parser.add_argument(
         "--tick-rate",
         type=float,
         default=30.0,
-        help="server tick rate; c1 must match the server's --tick-rate",
+        help="server tick rate; c1/c2 must match the server's --tick-rate",
+    )
+    parser.add_argument(
+        "--interpolation-delay-ms",
+        type=float,
+        default=100.0,
+        help="c2: how far behind the server timeline to render the opponent",
     )
     args = parser.parse_args()
+    if args.interpolation_delay_ms < 0:
+        parser.error("--interpolation-delay-ms must be non-negative")
 
-    asyncio.run(run_game(args.host, args.port, args.mode, args.tick_rate, args.player))
+    asyncio.run(
+        run_game(
+            args.host,
+            args.port,
+            args.mode,
+            args.tick_rate,
+            args.player,
+            args.interpolation_delay_ms / 1000.0,
+        )
+    )
 
 
 if __name__ == "__main__":

@@ -108,6 +108,28 @@ class SnapshotInterpolatorTest(unittest.TestCase):
         self.assertEqual(remote[0].flags, proto.FLAG_ATTACKING)
         self.assertIsNotNone(client.get_entity())
 
+    def test_late_older_snapshot_does_not_regress_remote_state(self) -> None:
+        client = InterpolatedClient(
+            ClientConfig(input_rate=30),
+            ServerConfig(tick_rate=30),
+            interpolation_delay=0.05,
+        )
+        client.player_id = 1
+        newer = proto.pack_snapshot(
+            Header(MsgType.SNAPSHOT, seq=12, tick=103),
+            snapshot(5, 20, remote_health=60),
+        )
+        older = proto.pack_snapshot(
+            Header(MsgType.SNAPSHOT, seq=11, tick=100),
+            snapshot(4, 10, remote_health=100),
+        )
+
+        client.handle_datagram(newer)
+        client.handle_datagram(older)
+
+        self.assertEqual(client.latest_snapshot.snapshot_id, 5)
+        self.assertEqual(client.get_remote_entities()[0].health, 60)
+
 
 if __name__ == "__main__":
     unittest.main()

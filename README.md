@@ -24,6 +24,10 @@ netcode_lab/
     __main__.py        command-line entry point
   client/
     client.py          C0 client core (join, input, snapshot state)
+    predicted_client.py  C1 client (prediction + reconciliation)
+    prediction.py        predictor logic and correction stats
+    interpolated_client.py  C2 client (C1 + remote interpolation)
+    interpolation.py     snapshot interpolator
     bot.py             headless patrol bot and reporting
     __main__.py        command-line entry point
 tests/                 protocol, ack window, world and integration tests
@@ -71,6 +75,22 @@ at the end. With `--csv`, the columns `mode`, `pending_inputs`,
 `reconciliations`, `corrections` and `last_correction_px` are added (zeros for
 C0).
 
+## Running a C2 (interpolation) client
+
+C2 is C1 plus a delayed interpolation buffer for **remote** players
+(`netcode_lab/client/interpolation.py`). The local player stays predicted; the
+opponent is rendered `interpolation_delay` behind the estimated server
+timeline so movement is smooth under jitter/loss.
+
+```
+python -m netcode_lab.client --mode c2 --host 127.0.0.1 --port 9000 \
+    --tick-rate 30 --interpolation-delay-ms 100 --duration 10
+```
+
+`--tick-rate` must match the server. `--interpolation-delay-ms` (default 100)
+sets the playback delay; the effective visible delay is roughly this plus the
+one-way network delay. Correction metrics are reported the same way as C1.
+
 ## Running the pygame fighter (server-authoritative)
 
 Run **one window per player**. Each window is a separate client that claims a
@@ -97,18 +117,20 @@ Pick the netcode phase independently per window with `--mode`:
 
 - `--mode c0` — draw the server's authoritative state (default)
 - `--mode c1` — client-side prediction for the local fighter
+- `--mode c2` — C1 plus interpolated rendering of the opponent
 
-Each window renders its own player via its own client (predicted in `c1`) and
-the opponent from server snapshots. Running one window as `c1` and the other
-as `c0` lets you see prediction on one screen while the other still shows
-snapshot latency. Set the same `--tick-rate` on server and any `c1` client:
+Each window renders its own player via its own client (predicted in `c1`/`c2`)
+and the opponent from snapshots (`c2` interpolates it). Running different
+modes per window lets you compare them side by side. Set the same
+`--tick-rate` on server and any `c1`/`c2` client:
 
 ```
-python pygame_fighter.py --player 1 --mode c1 --tick-rate 30
+python pygame_fighter.py --player 1 --mode c2 --tick-rate 30 --interpolation-delay-ms 100
 ```
 
-Flags: `--player {1,2}` (required), `--mode {c0,c1}`, `--tick-rate`,
-`--host`, `--port`. The active mode and player are shown in the window.
+Flags: `--player {1,2}` (required), `--mode {c0,c1,c2}`, `--tick-rate`,
+`--interpolation-delay-ms` (C2), `--host`, `--port`. The active mode and
+player are shown in the window.
 
 Controls: player 1 uses `WASD` + `F` (attack); player 2 uses arrow keys + `K`
 (attack); `R` = rematch after a KO; `ESC` = quit.

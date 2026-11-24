@@ -44,10 +44,10 @@ class InterpolatedClient(PredictedClient):
         if (
             header.msg_type is proto.MsgType.SNAPSHOT
             and self.snapshots_received != previous_count
-            and self.latest_snapshot is not None
+            and self.last_received_snapshot is not None
         ):
             self.interpolator.add_snapshot(
-                self.latest_snapshot,
+                self.last_received_snapshot,
                 server_tick=header.tick,
                 received_at=received_at,
             )

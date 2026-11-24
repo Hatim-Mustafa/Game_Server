@@ -4,6 +4,10 @@ SEQ_MASK = 0xFFFFFFFF
 WINDOW_BITS = 32
 
 
+def seq_newer(a: int, b: int) -> bool:
+    return a != b and ((a - b) & SEQ_MASK) < 0x80000000
+
+
 class AckWindow:
     def __init__(self) -> None:
         self.highest: int = 0

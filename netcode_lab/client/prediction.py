@@ -28,15 +28,11 @@ import math
 from collections import deque
 from dataclasses import dataclass, field
 
-SEQ_MASK = 0xFFFFFFFF
+from netcode_lab.protocol.ack import SEQ_MASK, seq_newer
+
 # Server positions are rounded to whole units on the wire, so a difference
 # below this is rounding noise, not a real correction.
 DEFAULT_CORRECTION_THRESHOLD = 1.0
-
-
-def seq_newer(a: int, b: int) -> bool:
-    """True if 32-bit sequence ``a`` is newer than ``b`` (handles wrap-around)."""
-    return a != b and ((a - b) & SEQ_MASK) < 0x80000000
 
 
 @dataclass(frozen=True)

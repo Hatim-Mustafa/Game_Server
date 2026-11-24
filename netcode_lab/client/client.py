@@ -5,7 +5,7 @@ import logging
 from dataclasses import dataclass
 
 from netcode_lab.protocol import messages as proto
-from netcode_lab.protocol.ack import AckWindow
+from netcode_lab.protocol.ack import AckWindow, seq_newer
 
 log = logging.getLogger(__name__)
 
@@ -38,6 +38,7 @@ class GameClient:
         self.input_seq = 0
         self.tick = 0
         self.latest_snapshot: proto.Snapshot | None = None
+        self.last_received_snapshot: proto.Snapshot | None = None
         self.snapshots_received = 0
         self.joined = asyncio.Event()
         self.move_x = 0
@@ -90,7 +91,6 @@ class GameClient:
             return
 
         self.server_ack.mark(header.seq)
-        self.tick = header.tick
 
         try:
             if header.msg_type is proto.MsgType.JOIN_ACK:
@@ -105,12 +105,19 @@ class GameClient:
                     )
                     return
                 self.player_id = assigned
+                self.tick = header.tick
                 if not self.joined.is_set():
                     log.info("joined as player %d", self.player_id)
                     self.joined.set()
             elif header.msg_type is proto.MsgType.SNAPSHOT:
-                self.latest_snapshot = proto.parse_snapshot(payload)
+                snapshot = proto.parse_snapshot(payload)
+                self.last_received_snapshot = snapshot
                 self.snapshots_received += 1
+                if self.latest_snapshot is None or seq_newer(
+                    snapshot.snapshot_id, self.latest_snapshot.snapshot_id
+                ):
+                    self.latest_snapshot = snapshot
+                    self.tick = header.tick
             elif header.msg_type is proto.MsgType.EVENT:
                 event_id, event_type, _ = proto.parse_event(payload)
                 log.info("event %d type %d", event_id, event_type)
