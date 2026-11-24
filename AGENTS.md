@@ -12,7 +12,6 @@ compare netcode techniques empirically:
 - `C1` client-side prediction + reconciliation (implemented)
 - `C2` entity interpolation of remote players (implemented)
 - `C3` input redundancy + delta compression (implemented)
-- TCP baseline (not yet implemented)
 
 The course project spec is `docs/CN_Project_Proposal.pdf`. Concept notes are
 in `docs/CONCEPTS.md`; the **frozen wire format** is `docs/PROTOCOL.md`.

@@ -53,19 +53,17 @@ velocities, scores, etc.) and sends it to clients. That package is a
 The whole project asks: what happens to the game's feel as these worsen, and
 which techniques mitigate it?
 
-### Why UDP instead of TCP
+### Why UDP
 
-- **TCP** guarantees that every byte arrives, in order. Great for files. But
-  if one packet is lost, everything behind it waits for a retransmission —
-  this is **head-of-line blocking**. In a fast game, a stale packet is
-  useless; you want the newest state, not the delayed old one.
+- Reliable stream transports guarantee ordering by retransmitting lost data.
+  If one packet is lost, everything behind it waits for the retransmission —
+  **head-of-line blocking**. In a fast game, a stale packet is useless; you
+  want the newest state, not the delayed old one.
 - **UDP** sends datagrams with no guarantees: they may be lost, duplicated or
   reordered. That sounds worse, but it means the application decides what to
   do when something is lost — which is exactly what game netcode is about.
 
-The game therefore runs over **UDP with a small custom reliability layer**,
-and a **TCP version** exists purely to demonstrate the head-of-line-blocking
-downside in the results.
+The game therefore runs over **UDP with a small custom reliability layer**.
 
 ---
 
@@ -150,16 +148,10 @@ back to a full snapshot if the baseline snapshot is missing.
 Position snapshots are safe to lose because a newer one supersedes them. But
 "you scored" or "player joined" cannot be replaced by the next state, so
 those messages use a small **acknowledged (reliable) channel**: send, wait for
-ack, resend if needed. This re-implements, by hand, the reliability TCP gives
-for free — but only for the few messages that need it.
+ack, resend if needed. This provides reliability by hand, but only for the few
+messages that need it.
 
-### 8. TCP baseline
-
-The same game over TCP instead of UDP, to show **head-of-line blocking**: under
-packet loss TCP stalls waiting for retransmissions while the UDP stack keeps
-flowing. The results table compares them.
-
-### 9. Configurations C0–C3
+### 8. Configurations C0–C3
 
 The same game at four cumulative levels, so each technique's effect can be
 isolated:
@@ -183,9 +175,6 @@ Only a small, well-understood subset is required:
 - **UDP socket** — bind to an address/port, `sendto`/`recvfrom` with a byte
   buffer. No connection, no ordering. Messages are packed and unpacked by
   hand.
-- **TCP socket** — `connect`/`accept` and `send`/`recv` over a **stream**. A
-  stream has no message boundaries, so a length prefix must be added to frame
-  each message.
 - **Non-blocking / async** — Python `asyncio` lets the server handle several
   clients and the game loop together; this is why the proposal references
   `asyncio`.

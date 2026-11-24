@@ -6,7 +6,7 @@ A study on the advancements made in game servers.
 
 Authoritative two-player arena game over a custom binary UDP protocol. It
 evaluates client-side prediction, entity interpolation and input redundancy
-under controlled delay and packet loss, with a TCP baseline for comparison.
+under controlled delay and packet loss.
 See `docs/CONCEPTS.md` for the concept reference and the input/snapshot
 walkthrough, and `docs/PROTOCOL.md` for the frozen wire format.
 
